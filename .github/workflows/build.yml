@@ -2,7 +2,11 @@ name: Build APK
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,7 +22,24 @@ jobs:
           gradle-version: "8.7"
       - name: Build
         run: gradle assembleDebug --stacktrace
+      - name: Rename
+        run: cp app/build/outputs/apk/debug/app-debug.apk ColorTap.apk
       - uses: actions/upload-artifact@v4
         with:
           name: ColorTap
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ColorTap.apk
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest ColorTap.apk --title "ColorTap (última versión)" --notes "Build ${{ github.run_number }} — descargá ColorTap.apk"
+      - name: Save APK to branch "apk"
+        run: |
+          mkdir out && cp ColorTap.apk out/ && cd out
+          git init -q -b apk
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add ColorTap.apk
+          git commit -qm "APK build ${{ github.run_number }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" apk
