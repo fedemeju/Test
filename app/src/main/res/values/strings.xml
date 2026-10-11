@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ColorTap</string>
+    <string name="accessibility_desc">Permite que ColorTap muestre la burbuja flotante y toque la pantalla cuando detecta el color elegido.</string>
+</resources>
