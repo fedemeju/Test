@@ -80,6 +80,7 @@ class ClickerService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        hideMenu()
         exitEdit(save = false)
         removeBubble()
         instance = null
@@ -119,7 +120,7 @@ class ClickerService : AccessibilityService() {
 
     // ---------- Estado general ----------
     fun refresh() {
-        if (Engine.capturing) showBubble() else { exitEdit(save = false); removeBubble() }
+        if (Engine.capturing) showBubble() else { hideMenu(); exitEdit(save = false); removeBubble() }
         bubble?.invalidate()
         updateExclude()
     }
@@ -172,17 +173,81 @@ class ClickerService : AccessibilityService() {
     }
 
     private fun onBubbleTap() {
+        if (menu != null) { hideMenu(); return }
         if (Engine.editing) { exitEdit(save = true); return }
-        if (!Engine.cfg.ready) {
-            Toast.makeText(this, "Primero mantené apretada la burbuja para elegir el sector", Toast.LENGTH_LONG).show()
+        if (Engine.active) {
+            Engine.setActive(this, false)
+            Toast.makeText(this, "ColorTap en pausa", Toast.LENGTH_SHORT).show()
             return
         }
-        Engine.setActive(this, !Engine.active)
-        Toast.makeText(this, if (Engine.active) "ColorTap ACTIVO" else "ColorTap en pausa", Toast.LENGTH_SHORT).show()
+        showMenu()
     }
 
     private fun onBubbleLongPress() {
+        hideMenu()
         if (Engine.editing) exitEdit(save = true) else enterEdit()
+    }
+
+    private fun start() {
+        if (!Engine.cfg.ready) {
+            Toast.makeText(this, "Primero elegí la zona", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Engine.setActive(this, true)
+        val c = Engine.cfg
+        Toast.makeText(this, if (c.full) "ACTIVO en toda la pantalla" else "ACTIVO en la zona elegida", Toast.LENGTH_SHORT).show()
+    }
+
+    // ---------- Menú de la burbuja ----------
+    private var menu: LinearLayout? = null
+
+    private fun showMenu() {
+        if (menu != null) return
+        val c = Engine.cfg
+        val m = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6f), dp(6f), dp(6f), dp(6f))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(240, 30, 30, 36)); cornerRadius = dp(12f).toFloat()
+            }
+        }
+        fun item(label: String, onClick: () -> Unit) {
+            m.addView(Button(this).apply {
+                text = label; textSize = 14f; isAllCaps = false; gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                setOnClickListener { hideMenu(); onClick() }
+            }, LinearLayout.LayoutParams(dp(220f), LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        val zona = when {
+            c.full -> "toda la pantalla"
+            c.hasRegion -> "zona guardada"
+            else -> null
+        }
+        if (zona != null) item("▶  Empezar ($zona)") { start() }
+        item("✏️  Editar zona") { enterEdit() }
+        item("⛶  Toda la pantalla y empezar") {
+            Engine.save(this, Engine.cfg.copy(full = true))
+            start()
+        }
+        item("✕  Cerrar") {}
+
+        val bl = bubbleLp
+        val p = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT).apply {
+            flags = flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+            val bx = bl?.x ?: 0; val by = bl?.y ?: 0
+            x = if (bx > screenW() / 2) max(0, bx - dp(232f)) else bx + dp(58f)
+            y = max(0, min(by, screenH() - dp(260f)))
+        }
+        m.setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) hideMenu()
+            false
+        }
+        menu = m
+        wm.addView(m, p)
+    }
+
+    private fun hideMenu() {
+        menu?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        menu = null
     }
 
     @SuppressLint("ViewConstructor")
@@ -269,7 +334,9 @@ class ClickerService : AccessibilityService() {
         val c = Engine.cfg
         val sw = screenW(); val sh = screenH()
         val bw: Int; val bh: Int; val bx: Int; val by: Int
-        if (c.hasRegion && c.rx + c.rw <= sw + 4 && c.ry + c.rh <= sh + 4) {
+        if (c.full) {
+            bw = sw; bh = sh; bx = 0; by = 0
+        } else if (c.hasRegion && c.rx >= 0 && c.rx + c.rw <= sw + 4 && c.ry + c.rh <= sh + 4) {
             bw = c.rw; bh = c.rh; bx = c.rx; by = c.ry
         } else {
             // por defecto: casi toda la pantalla
@@ -372,6 +439,7 @@ class ClickerService : AccessibilityService() {
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row2.addView(btn("Probar toque") { testTap() })
         row2.addView(btn("Guardar") { exitEdit(save = true) })
+        row2.addView(btn("▶ Empezar") { exitEdit(save = true, quiet = true); start() })
         pnl.addView(row2)
 
         val p = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT).apply {
@@ -476,7 +544,8 @@ class ClickerService : AccessibilityService() {
         val b = box ?: return
         if (b.width == 0) return
         val bl = IntArray(2); b.getLocationOnScreen(bl)
-        var nc = Engine.cfg.copy(rx = bl[0], ry = bl[1], rw = b.width, rh = b.height)
+        val isFull = bl[0] <= 0 && bl[1] <= 0 && b.width >= screenW() - 2 && b.height >= screenH() - 2
+        var nc = Engine.cfg.copy(rx = bl[0], ry = bl[1], rw = b.width, rh = b.height, full = isFull)
         cross?.let { cr ->
             if (cr.width > 0) {
                 val cl = IntArray(2); cr.getLocationOnScreen(cl)
@@ -486,7 +555,7 @@ class ClickerService : AccessibilityService() {
         if (nc != Engine.cfg) Engine.save(this, nc)
     }
 
-    private fun exitEdit(save: Boolean) {
+    private fun exitEdit(save: Boolean, quiet: Boolean = false) {
         if (!Engine.editing && box == null) return
         if (save) saveGeometry()
         main.removeCallbacks(infoUpdater)
@@ -496,7 +565,7 @@ class ClickerService : AccessibilityService() {
         Engine.stateChanged(this)
         bubble?.invalidate()
         updateExclude()
-        if (save) Toast.makeText(this, "Guardado. Tocá la burbuja para activar.", Toast.LENGTH_SHORT).show()
+        if (save && !quiet) Toast.makeText(this, "Zona guardada. Tocá la burbuja para empezar.", Toast.LENGTH_SHORT).show()
     }
 
     /** Marco del sector: arrastrar para mover, esquina inferior derecha para cambiar tamaño. */

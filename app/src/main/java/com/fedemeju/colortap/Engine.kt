@@ -25,9 +25,10 @@ data class Cfg(
     val intervalMs: Int = 30,    // cada cuánto se revisa la pantalla
     val cooldownMs: Int = 80,    // espera mínima entre toques
     val repeat: Boolean = false, // modo punto fijo: seguir tocando mientras siga el color
-    val multi: Boolean = true    // tocar todos los círculos a la vez (multitoque)
+    val multi: Boolean = true,   // si aparecen varios juntos, tocarlos a la vez
+    val full: Boolean = false    // vigilar toda la pantalla (se adapta al girar)
 ) {
-    val hasRegion get() = rw > 0 && rh > 0
+    val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
     val ready get() = hasRegion && (mode == MODE_ON_COLOR || hasTarget)
 
@@ -104,7 +105,8 @@ object Engine {
             intervalMs = p.getInt("intervalMs", d.intervalMs),
             cooldownMs = p.getInt("cooldownMs2", d.cooldownMs),
             repeat = p.getBoolean("repeat", d.repeat),
-            multi = p.getBoolean("multi", d.multi)
+            multi = p.getBoolean("multi", d.multi),
+            full = p.getBoolean("full", d.full)
         )
     }
 
@@ -115,7 +117,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).apply()
     }
 
     // ---------- Estado ----------
@@ -172,8 +174,14 @@ object Engine {
         val scY = if (screenH > 0) screenH.toFloat() / h else 1f
 
         val inset = if (editing) ClickerService.BORDER_PX + 2 else 0
-        val x0 = max(0, ((c.rx + inset) / scX).toInt()); val y0 = max(0, ((c.ry + inset) / scY).toInt())
-        val x1 = min(w, ((c.rx + c.rw - inset) / scX).toInt()); val y1 = min(h, ((c.ry + c.rh - inset) / scY).toInt())
+        val x0: Int; val y0: Int; val x1: Int; val y1: Int
+        if (c.full) {
+            val ins = (inset / scX).toInt()
+            x0 = ins; y0 = ins; x1 = w - ins; y1 = h - ins
+        } else {
+            x0 = max(0, ((c.rx + inset) / scX).toInt()); y0 = max(0, ((c.ry + inset) / scY).toInt())
+            x1 = min(w, ((c.rx + c.rw - inset) / scX).toInt()); y1 = min(h, ((c.ry + c.rh - inset) / scY).toInt())
+        }
         if (x1 - x0 < 2 || y1 - y0 < 2) return
 
         if (sampleRequest) {

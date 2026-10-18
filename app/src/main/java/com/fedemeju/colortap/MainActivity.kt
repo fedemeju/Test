@@ -97,9 +97,10 @@ class MainActivity : Activity() {
         root.addView(title("3. Cómo se usa"))
         root.addView(note(
             "• Aparece una burbuja flotante encima de todo.\n" +
-            "• En el juego, mantenela apretada → modo ajuste. El marco amarillo es la zona que se vigila: arrastralo para moverlo, el triángulo de la esquina cambia el tamaño, o tocá \"Pantalla entera\".\n" +
+            "• En el juego, tocá la burbuja y elegí: Empezar, Editar zona o Toda la pantalla.\n" +
+            "• En Editar zona, el marco amarillo es la zona que se vigila: arrastralo para moverlo, el triángulo de la esquina cambia el tamaño, o tocá \"Pantalla entera\". Después \"▶ Empezar\".\n" +
             "• El panel muestra una vista previa de lo que ve la app: lo pintado en VERDE es lo que detecta. Si los círculos no se pintan de verde, tocá uno en la vista previa para tomar su color exacto.\n" +
-            "• \"Guardar\" y después tocá la burbuja: azul = activo, gris = pausa. Cada toque hace parpadear la burbuja.\n" +
+            "• Mientras está activo (burbuja azul), tocala para pausar. Cada toque hace parpadear la burbuja.\n" +
             "• Modo \"tocar el color\": toca encima de cada círculo que aparece. Modo \"punto fijo\": cuando aparece el color, toca siempre en la mira celeste.\n" +
             "• También podés agregar el botón \"ColorTap\" en los ajustes rápidos (menú que bajás desde arriba)."))
 
