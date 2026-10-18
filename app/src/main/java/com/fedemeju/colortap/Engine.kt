@@ -272,6 +272,8 @@ object Engine {
         }
 
         if (!active) return
+        // No mandar un toque nuevo mientras el anterior sigue en curso (se cancelaría)
+        if (busy && now - busySince < TAP_MS + 250) return
         if (now - lastTap < c.cooldownMs) return
 
         if (c.mode == Cfg.MODE_ON_COLOR) {
@@ -281,13 +283,13 @@ object Engine {
                     val xs = FloatArray(nf); val ys = FloatArray(nf)
                     for (k in 0 until nf) { xs[k] = freshX[k]; ys[k] = freshY[k]; remember(xs[k], ys[k], now) }
                     tapCount += nf
-                    ClickerService.instance?.tapMany(xs, ys)
+                    fire { ClickerService.instance?.tapMany(xs, ys) }
                 } else {
                     var bi = 0
                     for (k in 1 until nf) if (freshS[k] > freshS[bi]) bi = k
                     remember(freshX[bi], freshY[bi], now)
                     tapCount++
-                    ClickerService.instance?.tap(freshX[bi], freshY[bi])
+                    fire { ClickerService.instance?.tap(freshX[bi], freshY[bi]) }
                 }
             }
         } else {
@@ -295,7 +297,7 @@ object Engine {
             if (match && (c.repeat || !wasMatch)) {
                 lastTap = now
                 tapCount++
-                ClickerService.instance?.tap(c.tx.toFloat(), c.ty.toFloat())
+                fire { ClickerService.instance?.tap(c.tx.toFloat(), c.ty.toFloat()) }
             }
             wasMatch = match
         }
@@ -309,6 +311,29 @@ object Engine {
             if (dx * dx + dy * dy < r * r) return true
         }
         return false
+    }
+
+    const val TAP_MS = 30L
+    @Volatile private var busy = false
+    @Volatile private var busySince = 0L
+
+    private inline fun fire(f: () -> Unit) {
+        busy = true; busySince = System.currentTimeMillis()
+        f()
+    }
+
+    /** Llamado cuando Android termina (o cancela) un toque. */
+    fun onGestureDone(xs: FloatArray, ys: FloatArray, completed: Boolean) {
+        busy = false
+        if (!completed) {
+            // no se registró: olvidar esos blancos para volver a tocarlos ya
+            synchronized(recentT) {
+                for (k in xs.indices) for (i in recentT.indices) {
+                    if (recentX[i] == xs[k] && recentY[i] == ys[k]) recentT[i] = 0
+                }
+            }
+            tapCount -= xs.size
+        }
     }
 
     private fun remember(x: Float, y: Float, now: Long) {

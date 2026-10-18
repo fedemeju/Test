@@ -88,30 +88,27 @@ class ClickerService : AccessibilityService() {
     }
 
     // ---------- Toques ----------
-    fun tap(x: Float, y: Float) {
-        main.post {
-            val path = Path().apply { moveTo(x, y) }
-            val g = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
-                .build()
-            dispatchGesture(g, null, null)
-            flashUntil = System.currentTimeMillis() + 120
-            bubble?.invalidate()
-            main.postDelayed({ bubble?.invalidate() }, 130)
-        }
-    }
+    fun tap(x: Float, y: Float) = tapMany(floatArrayOf(x), floatArrayOf(y))
 
-    /** Varios toques simultáneos (un dedo por círculo). */
+    /**
+     * Uno o varios toques simultáneos (un dedo por blanco).
+     * Avisa a Engine cuando termina; si Android lo cancela, Engine reintenta esos blancos.
+     */
     fun tapMany(xs: FloatArray, ys: FloatArray) {
-        if (xs.size == 1) { tap(xs[0], ys[0]); return }
         main.post {
-            val maxStrokes = GestureDescription.getMaxStrokeCount()
+            val n = min(xs.size, GestureDescription.getMaxStrokeCount())
             val b = GestureDescription.Builder()
-            for (k in 0 until min(xs.size, maxStrokes)) {
+            for (k in 0 until n) {
                 val path = Path().apply { moveTo(xs[k], ys[k]) }
-                b.addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+                b.addStroke(GestureDescription.StrokeDescription(path, 0, Engine.TAP_MS))
             }
-            dispatchGesture(b.build(), null, null)
+            val ok = try {
+                dispatchGesture(b.build(), object : GestureResultCallback() {
+                    override fun onCompleted(d: GestureDescription?) { Engine.onGestureDone(xs, ys, true) }
+                    override fun onCancelled(d: GestureDescription?) { Engine.onGestureDone(xs, ys, false) }
+                }, null)
+            } catch (_: Exception) { false }
+            if (!ok) Engine.onGestureDone(xs, ys, false)
             flashUntil = System.currentTimeMillis() + 120
             bubble?.invalidate()
             main.postDelayed({ bubble?.invalidate() }, 130)
