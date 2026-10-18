@@ -24,7 +24,8 @@ data class Cfg(
     val minSize: Int = 20,       // tamaño mínimo de la mancha (px de diámetro aprox.)
     val intervalMs: Int = 30,    // cada cuánto se revisa la pantalla
     val cooldownMs: Int = 80,    // espera mínima entre toques
-    val repeat: Boolean = false  // modo punto fijo: seguir tocando mientras siga el color
+    val repeat: Boolean = false, // modo punto fijo: seguir tocando mientras siga el color
+    val multi: Boolean = true    // tocar todos los círculos a la vez (multitoque)
 ) {
     val hasRegion get() = rw > 0 && rh > 0
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -71,11 +72,14 @@ object Engine {
     private val main = Handler(Looper.getMainLooper())
 
     // memoria de toques recientes para no repetir el mismo círculo
-    private val recentX = FloatArray(16)
-    private val recentY = FloatArray(16)
-    private val recentT = LongArray(16)
+    private val recentX = FloatArray(40)
+    private val recentY = FloatArray(40)
+    private val recentT = LongArray(40)
     private var recentI = 0
     private const val MEMORY_MS = 450L
+    private val freshX = FloatArray(10)
+    private val freshY = FloatArray(10)
+    private val freshS = IntArray(10)
 
     // buffers reutilizables
     private var grid = BooleanArray(0)
@@ -99,7 +103,8 @@ object Engine {
             minSize = p.getInt("minSize", d.minSize),
             intervalMs = p.getInt("intervalMs", d.intervalMs),
             cooldownMs = p.getInt("cooldownMs2", d.cooldownMs),
-            repeat = p.getBoolean("repeat", d.repeat)
+            repeat = p.getBoolean("repeat", d.repeat),
+            multi = p.getBoolean("multi", d.multi)
         )
     }
 
@@ -110,7 +115,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).apply()
     }
 
     // ---------- Estado ----------
@@ -219,7 +224,7 @@ object Engine {
         val minCells = max(1, ((c.minSize.toFloat() / step) * (c.minSize.toFloat() / step) * 0.4f).toInt())
         var blobs = 0
         var bestX = 0f; var bestY = 0f; var bestSize = 0
-        var bestFreshX = 0f; var bestFreshY = 0f; var bestFreshSize = 0
+        var nf = 0
         var lab = 0
         for (start in 0 until n) {
             if (!grid[start] || label[start] != 0) continue
@@ -241,8 +246,14 @@ object Engine {
             val cx = (x0 + (sxs.toFloat() / cnt) * step + step / 2f) * scX
             val cy = (y0 + (sys.toFloat() / cnt) * step + step / 2f) * scY
             if (cnt > bestSize) { bestSize = cnt; bestX = cx; bestY = cy }
-            if (cnt > bestFreshSize && !recentlyTapped(cx, cy, sqrt(cnt.toFloat()) * step * scX, now)) {
-                bestFreshSize = cnt; bestFreshX = cx; bestFreshY = cy
+            if (!recentlyTapped(cx, cy, sqrt(cnt.toFloat()) * step * scX, now)) {
+                // guardar los más grandes (hasta 10)
+                if (nf < freshX.size) { freshX[nf] = cx; freshY[nf] = cy; freshS[nf] = cnt; nf++ }
+                else {
+                    var mi = 0
+                    for (k in 1 until nf) if (freshS[k] < freshS[mi]) mi = k
+                    if (cnt > freshS[mi]) { freshX[mi] = cx; freshY[mi] = cy; freshS[mi] = cnt }
+                }
             }
         }
         lastBlobs = blobs
@@ -256,11 +267,20 @@ object Engine {
         if (now - lastTap < c.cooldownMs) return
 
         if (c.mode == Cfg.MODE_ON_COLOR) {
-            if (bestFreshSize > 0) {
+            if (nf > 0) {
                 lastTap = now
-                remember(bestFreshX, bestFreshY, now)
-                tapCount++
-                ClickerService.instance?.tap(bestFreshX, bestFreshY)
+                if (c.multi) {
+                    val xs = FloatArray(nf); val ys = FloatArray(nf)
+                    for (k in 0 until nf) { xs[k] = freshX[k]; ys[k] = freshY[k]; remember(xs[k], ys[k], now) }
+                    tapCount += nf
+                    ClickerService.instance?.tapMany(xs, ys)
+                } else {
+                    var bi = 0
+                    for (k in 1 until nf) if (freshS[k] > freshS[bi]) bi = k
+                    remember(freshX[bi], freshY[bi], now)
+                    tapCount++
+                    ClickerService.instance?.tap(freshX[bi], freshY[bi])
+                }
             }
         } else {
             val match = blobs > 0

@@ -35,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var hueField: EditText
     private lateinit var sizeField: EditText
     private lateinit var modeBox: CheckBox
+    private lateinit var multiBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
     private lateinit var repeatBox: CheckBox
@@ -135,6 +136,10 @@ class MainActivity : Activity() {
             text = "Modo punto fijo (en vez de tocar sobre el color)"; isChecked = c.mode == Cfg.MODE_FIXED; textSize = 15f
         }
         root.addView(modeBox)
+        multiBox = CheckBox(this).apply {
+            text = "Multitoque: tocar todos los círculos a la vez"; isChecked = c.multi; textSize = 15f
+        }
+        root.addView(multiBox)
         repeatBox = CheckBox(this).apply {
             text = "Punto fijo: seguir tocando mientras el color siga ahí"; isChecked = c.repeat; textSize = 15f
         }
@@ -198,7 +203,8 @@ class MainActivity : Activity() {
             mode = if (modeBox.isChecked) Cfg.MODE_FIXED else Cfg.MODE_ON_COLOR,
             intervalMs = num(intervalField, c.intervalMs, 0, 5000),
             cooldownMs = num(cooldownField, c.cooldownMs, 0, 60000),
-            repeat = repeatBox.isChecked
+            repeat = repeatBox.isChecked,
+            multi = multiBox.isChecked
         ))
         updateSwatch()
         Toast.makeText(this, "Ajustes guardados", Toast.LENGTH_SHORT).show()

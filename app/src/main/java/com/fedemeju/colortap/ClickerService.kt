@@ -100,6 +100,23 @@ class ClickerService : AccessibilityService() {
         }
     }
 
+    /** Varios toques simultáneos (un dedo por círculo). */
+    fun tapMany(xs: FloatArray, ys: FloatArray) {
+        if (xs.size == 1) { tap(xs[0], ys[0]); return }
+        main.post {
+            val maxStrokes = GestureDescription.getMaxStrokeCount()
+            val b = GestureDescription.Builder()
+            for (k in 0 until min(xs.size, maxStrokes)) {
+                val path = Path().apply { moveTo(xs[k], ys[k]) }
+                b.addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+            }
+            dispatchGesture(b.build(), null, null)
+            flashUntil = System.currentTimeMillis() + 120
+            bubble?.invalidate()
+            main.postDelayed({ bubble?.invalidate() }, 130)
+        }
+    }
+
     // ---------- Estado general ----------
     fun refresh() {
         if (Engine.capturing) showBubble() else { exitEdit(save = false); removeBubble() }
