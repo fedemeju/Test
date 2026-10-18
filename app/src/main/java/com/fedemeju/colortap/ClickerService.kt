@@ -220,6 +220,10 @@ class ClickerService : AccessibilityService() {
             else -> null
         }
         if (zona != null) item("▶  Empezar ($zona)") { start() }
+        item("🔀  " + modeLabel() + " (cambiar)") {
+            toggleMode()
+            Toast.makeText(this, modeLabel(), Toast.LENGTH_SHORT).show()
+        }
         item("✏️  Editar zona") { enterEdit() }
         item("⛶  Toda la pantalla y empezar") {
             Engine.save(this, Engine.cfg.copy(full = true))
@@ -459,20 +463,36 @@ class ClickerService : AccessibilityService() {
         main.postDelayed({ updateExclude() }, 300)
     }
 
-    private fun modeLabel() =
-        if (Engine.cfg.mode == Cfg.MODE_ON_COLOR) "Modo: tocar el color" else "Modo: punto fijo"
+    private fun modeLabel() = when (Engine.cfg.mode) {
+        Cfg.MODE_FIXED -> "Modo: punto fijo"
+        Cfg.MODE_LANES -> "Modo: carriles"
+        else -> "Modo: tocar el color"
+    }
 
     private fun toggleMode() {
         saveGeometry()
         val c = Engine.cfg
-        val nm = if (c.mode == Cfg.MODE_ON_COLOR) Cfg.MODE_FIXED else Cfg.MODE_ON_COLOR
-        Engine.save(this, c.copy(mode = nm))
-        if (nm == Cfg.MODE_FIXED) {
-            showCross()
-            Toast.makeText(this, "Mové la mira celeste adonde querés que toque", Toast.LENGTH_LONG).show()
-        } else hideCross()
+        val nm = when (c.mode) {
+            Cfg.MODE_ON_COLOR -> Cfg.MODE_FIXED
+            Cfg.MODE_FIXED -> Cfg.MODE_LANES
+            else -> Cfg.MODE_ON_COLOR
+        }
+        var nc = c.copy(mode = nm)
+        when (nm) {
+            Cfg.MODE_FIXED -> {
+                showCross()
+                Toast.makeText(this, "Punto fijo: mové la mira celeste adonde querés que toque", Toast.LENGTH_LONG).show()
+            }
+            Cfg.MODE_LANES -> {
+                hideCross()
+                nc = nc.copy(color = Cfg.PINK, hueTol = 22)
+                (swatch?.background as? GradientDrawable)?.setColor(Cfg.PINK)
+                Toast.makeText(this, "Carriles: el marco tiene que cubrir el área de juego de lado a lado. Verde = bloques, azul = naves.", Toast.LENGTH_LONG).show()
+            }
+            else -> hideCross()
+        }
+        Engine.save(this, nc)
         modeBtn?.text = modeLabel()
-        // el panel tiene que quedar arriba de la mira
         panel?.let { pn -> panelLp?.let { pl -> try { wm.removeView(pn); wm.addView(pn, pl) } catch (_: Exception) {} } }
     }
 
@@ -495,6 +515,7 @@ class ClickerService : AccessibilityService() {
             val txt = when {
                 Engine.frames == 0 -> "⚠️ No llegan imágenes de la pantalla.\nDetené y volvé a iniciar la captura."
                 Engine.black -> "⚠️ La captura sale NEGRA: este juego\nbloquea la captura de pantalla."
+                Engine.cfg.mode == Cfg.MODE_LANES -> Engine.laneInfo.ifEmpty { "Buscando naves…" }
                 else -> "Círculos detectados: ${Engine.lastBlobs}\nCaptura ${Engine.capW}×${Engine.capH}"
             }
             infoText?.text = txt

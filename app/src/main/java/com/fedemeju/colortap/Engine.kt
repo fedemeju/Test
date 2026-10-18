@@ -26,15 +26,18 @@ data class Cfg(
     val cooldownMs: Int = 80,    // espera mínima entre toques
     val repeat: Boolean = false, // modo punto fijo: seguir tocando mientras siga el color
     val multi: Boolean = true,   // si aparecen varios juntos, tocarlos a la vez
-    val full: Boolean = false    // vigilar toda la pantalla (se adapta al girar)
+    val full: Boolean = false,   // vigilar toda la pantalla (se adapta al girar)
+    val reactMs: Int = 260       // modo carriles: cuánto antes esquivar (ms antes del choque)
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
-    val ready get() = hasRegion && (mode == MODE_ON_COLOR || hasTarget)
+    val ready get() = hasRegion && (mode != MODE_FIXED || hasTarget)
 
     companion object {
         const val MODE_ON_COLOR = 0   // tocar encima de cada mancha del color
         const val MODE_FIXED = 1      // tocar un punto fijo cuando aparece el color
+        const val MODE_LANES = 2      // juego de 2 naves x 2 carriles: esquivar bloques
+        val PINK = Color.rgb(232, 67, 106)
     }
 }
 
@@ -106,7 +109,8 @@ object Engine {
             cooldownMs = p.getInt("cooldownMs2", d.cooldownMs),
             repeat = p.getBoolean("repeat", d.repeat),
             multi = p.getBoolean("multi", d.multi),
-            full = p.getBoolean("full", d.full)
+            full = p.getBoolean("full", d.full),
+            reactMs = p.getInt("reactMs", d.reactMs)
         )
     }
 
@@ -117,7 +121,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).apply()
     }
 
     // ---------- Estado ----------
@@ -125,6 +129,7 @@ object Engine {
         active = on && capturing && !editing && cfg.ready
         wasMatch = false
         recentT.fill(0)
+        speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1)
         stateChanged(ctx)
     }
 
@@ -189,6 +194,12 @@ object Engine {
             val col = sampleCenter(buf, x0, y0, x1, y1, rowStride, pixStride)
             save(ctx, c.copy(color = col))
             main.post { ClickerService.instance?.onColorSampled(col) }
+            return
+        }
+
+        if (c.mode == Cfg.MODE_LANES) {
+            Color.colorToHSV(c.color, thsv)
+            lanesFrame(buf, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c)
             return
         }
 
@@ -339,6 +350,208 @@ object Engine {
     private fun remember(x: Float, y: Float, now: Long) {
         recentX[recentI] = x; recentY[recentI] = y; recentT[recentI] = now
         recentI = (recentI + 1) % recentT.size
+    }
+
+    // =====================================================================
+    // MODO CARRILES: 2 naves (izq/der), 2 carriles cada una, bloques que bajan.
+    // La zona (marco) = área de juego; se divide en 4 carriles iguales.
+    // =====================================================================
+    @Volatile var laneInfo = ""
+    private var ltype = ByteArray(0)       // 0 nada, 1 obstáculo, 2 nave
+    private var speedEma = 0f              // velocidad de los bloques (px de captura por ms)
+    private val prevObs = FloatArray(4) { -1f }
+    private var prevObsT = 0L
+    private val sideLock = LongArray(2)
+    private val sideLaneAtTap = IntArray(2) { -1 }
+
+    private fun hueOf(r: Int, g: Int, b: Int, mx: Int, mn: Int): Float {
+        val d = (mx - mn).toFloat()
+        if (d == 0f) return 0f
+        var h = when (mx) {
+            r -> 60f * (((g - b) / d) % 6f)
+            g -> 60f * (((b - r) / d) + 2f)
+            else -> 60f * (((r - g) / d) + 4f)
+        }
+        if (h < 0) h += 360f
+        return h
+    }
+
+    /** Naves: celeste/verde agua o naranja, brillantes y saturadas. */
+    private fun isShip(r: Int, g: Int, b: Int): Boolean {
+        val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+        if (mx < 150) return false
+        if ((mx - mn).toFloat() / mx < 0.42f) return false
+        val h = hueOf(r, g, b, mx, mn)
+        return (h in 145f..205f) || (h in 10f..37f)
+    }
+
+    private fun lanesFrame(
+        buf: ByteBuffer, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
+        scX: Float, scY: Float, now: Long, c: Cfg
+    ) {
+        val step = max(3, (x1 - x0) / 200)
+        val gw = (x1 - x0) / step
+        val gh = (y1 - y0) / step
+        if (gw < 8 || gh < 8) return
+        val n = gw * gh
+        if (ltype.size < n) ltype = ByteArray(n)
+        if (cols.size < n) cols = IntArray(n)
+        val ex = exclude
+        var sum = 0L
+
+        // 1) clasificar cada muestra
+        var idx = 0
+        for (gy in 0 until gh) {
+            val y = y0 + gy * step
+            val row = y * rs
+            for (gx in 0 until gw) {
+                val x = x0 + gx * step
+                val i = row + x * ps
+                val r = buf.get(i).toInt() and 0xff
+                val g = buf.get(i + 1).toInt() and 0xff
+                val b = buf.get(i + 2).toInt() and 0xff
+                cols[idx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+                sum += r + g + b
+                var t: Byte = when {
+                    isShip(r, g, b) -> 2
+                    matches(r, g, b, c.hueTol) -> 1
+                    else -> 0
+                }
+                if (t != 0.toByte() && ex.isNotEmpty()) {
+                    val sx = (x * scX).toInt(); val sy = (y * scY).toInt()
+                    for (rc in ex) if (rc.contains(sx, sy)) { t = 0; break }
+                }
+                ltype[idx] = t
+                idx++
+            }
+        }
+        black = sum < n * 6L
+
+        // columnas de cada carril (con margen para no tocar el carril vecino)
+        val laneCols = gw / 4f
+        fun laneRange(l: Int): IntRange {
+            val a = (l * laneCols + laneCols * 0.12f).toInt()
+            val b = ((l + 1) * laneCols - laneCols * 0.12f).toInt() - 1
+            return a..max(a, b)
+        }
+        val laneSamples = IntArray(4) { laneRange(it).count() }
+
+        // fila con obstáculo en carril l: al menos 30% del ancho del carril
+        fun obsRow(l: Int, gy: Int): Boolean {
+            var k = 0
+            val base = gy * gw
+            for (gx in laneRange(l)) if (ltype[base + gx] == 1.toByte()) k++
+            return k * 10 >= laneSamples[l] * 3
+        }
+
+        // 2) naves: buscar en la mitad inferior de la zona
+        val shipCnt = IntArray(4); val shipTop = IntArray(4) { Int.MAX_VALUE }; val shipBot = IntArray(4) { -1 }
+        for (gy in (gh * 45 / 100) until gh) {
+            val base = gy * gw
+            for (l in 0 until 4) for (gx in laneRange(l)) {
+                if (ltype[base + gx] == 2.toByte()) {
+                    shipCnt[l]++
+                    if (gy < shipTop[l]) shipTop[l] = gy
+                    if (gy > shipBot[l]) shipBot[l] = gy
+                }
+            }
+        }
+
+        // 3) obstáculo más bajo de cada carril (por encima de la nave de ese lado)
+        val sideShipLane = IntArray(2) { -1 }
+        for (sd in 0..1) {
+            val a = sd * 2; val b = a + 1
+            val best = if (shipCnt[a] >= shipCnt[b]) a else b
+            if (shipCnt[best] >= 4) sideShipLane[sd] = best
+        }
+        val obsBottom = IntArray(4) { -1 }
+        for (l in 0 until 4) {
+            val sl = sideShipLane[l / 2]
+            val limit = if (sl >= 0) shipTop[sl] - 1 else gh - 1
+            var gy = limit
+            while (gy >= 0) {
+                if (obsRow(l, gy) && (gy == 0 || obsRow(l, gy - 1))) { obsBottom[l] = gy; break }
+                gy--
+            }
+        }
+
+        // 4) velocidad (los bloques bajan: el borde inferior crece)
+        if (prevObsT > 0) {
+            val dt = (now - prevObsT).toFloat()
+            if (dt in 1f..300f) {
+                for (l in 0 until 4) {
+                    if (obsBottom[l] < 0 || prevObs[l] < 0) continue
+                    val dy = (obsBottom[l] - prevObs[l]) * step
+                    if (dy > 0 && dy < (y1 - y0) / 4) {
+                        val v = dy / dt
+                        speedEma = if (speedEma == 0f) v else speedEma * 0.8f + v * 0.2f
+                    }
+                }
+            }
+        }
+        for (l in 0 until 4) prevObs[l] = obsBottom[l].toFloat()
+        prevObsT = now
+
+        // 5) decidir
+        val tx = FloatArray(2); val ty = FloatArray(2); var nt = 0
+        val tapSides = IntArray(2)
+        val info = StringBuilder()
+        for (sd in 0..1) {
+            val L = sideShipLane[sd]
+            info.append(if (sd == 0) "Izq: " else "  Der: ")
+            if (L < 0) { info.append("sin nave"); continue }
+            info.append("carril ${L % 2 + 1}")
+            if (sideLaneAtTap[sd] >= 0 && L != sideLaneAtTap[sd]) { sideLock[sd] = 0; sideLaneAtTap[sd] = -1 }
+            if (now < sideLock[sd]) continue
+            val ob = obsBottom[L]
+            if (ob < 0) continue
+            val shipH = max(3, shipBot[L] - shipTop[L] + 1)          // en celdas
+            val reach = max(shipH * 1.4f, speedEma * c.reactMs / step)  // en celdas
+            if (shipTop[L] - ob > reach) continue
+            // ¿el otro carril está libre a la altura de la nave?
+            val O = if (L % 2 == 0) L + 1 else L - 1
+            val safeTop = max(0, (shipTop[L] - reach * 0.6f - shipH).toInt())
+            var blocked = false
+            for (gy in safeTop..min(gh - 1, shipBot[L])) if (obsRow(O, gy)) { blocked = true; break }
+            if (blocked) { info.append(" (bloqueado)"); continue }
+            tx[nt] = (x0 + (x1 - x0) * (if (sd == 0) 0.25f else 0.75f)) * scX
+            ty[nt] = (y1 - (y1 - y0) * 0.06f) * scY
+            tapSides[nt] = sd
+            nt++
+        }
+        info.append(String.format("\nVelocidad: %.2f", speedEma))
+        laneInfo = info.toString()
+        lastBlobs = nt
+
+        if (editing && now - lastPreview > 300) {
+            lastPreview = now
+            val raw = cols.copyOf(n); val shown = IntArray(n)
+            for (i in 0 until n) {
+                val gx = i % gw
+                shown[i] = when {
+                    ltype[i] == 1.toByte() -> Color.rgb(0, 255, 90)
+                    ltype[i] == 2.toByte() -> Color.rgb(40, 140, 255)
+                    gx == gw / 4 || gx == gw * 3 / 4 -> Color.rgb(90, 90, 90)
+                    gx == gw / 2 -> Color.rgb(200, 200, 200)
+                    else -> { val cc = raw[i]; Color.rgb((Color.red(cc) * 0.5f).toInt(), (Color.green(cc) * 0.5f).toInt(), (Color.blue(cc) * 0.5f).toInt()) }
+                }
+            }
+            previewRaw = raw; previewW = gw; previewH = gh
+            val bmp = try { Bitmap.createBitmap(shown, gw, gh, Bitmap.Config.ARGB_8888) } catch (_: Exception) { null }
+            if (bmp != null) main.post { ClickerService.instance?.onPreview(bmp) }
+        }
+
+        if (!active || nt == 0) return
+        if (busy && now - busySince < TAP_MS + 250) return
+        for (k in 0 until nt) {
+            val sd = tapSides[k]
+            sideLock[sd] = now + 400
+            sideLaneAtTap[sd] = sideShipLane[sd]
+        }
+        lastTap = now
+        tapCount += nt
+        val xs = tx.copyOf(nt); val ys = ty.copyOf(nt)
+        fire { ClickerService.instance?.tapMany(xs, ys) }
     }
 
     /** Arma una imagen chica del sector: colores reales, y en verde lo detectado. */

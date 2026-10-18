@@ -19,6 +19,8 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -34,7 +36,8 @@ class MainActivity : Activity() {
     private lateinit var swatch: View
     private lateinit var hueField: EditText
     private lateinit var sizeField: EditText
-    private lateinit var modeBox: CheckBox
+    private lateinit var modeGroup: RadioGroup
+    private lateinit var reactField: EditText
     private lateinit var multiBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
@@ -133,10 +136,19 @@ class MainActivity : Activity() {
         sizeField = field("Tamaño mínimo del círculo (px)", c.minSize.toString())
         intervalField = field("Revisar cada (ms)", c.intervalMs.toString())
         cooldownField = field("Espera entre toques (ms)", c.cooldownMs.toString())
-        modeBox = CheckBox(this).apply {
-            text = "Modo punto fijo (en vez de tocar sobre el color)"; isChecked = c.mode == Cfg.MODE_FIXED; textSize = 15f
+        reactField = field("Carriles: anticipación (ms)", c.reactMs.toString())
+        root.addView(title("Modo"))
+        modeGroup = RadioGroup(this)
+        listOf(
+            Cfg.MODE_ON_COLOR to "Tocar sobre el color (blancos)",
+            Cfg.MODE_FIXED to "Punto fijo (toca la mira cuando aparece el color)",
+            Cfg.MODE_LANES to "Carriles (2 naves que esquivan bloques)"
+        ).forEach { (m, t) ->
+            modeGroup.addView(RadioButton(this).apply { id = 100 + m; text = t; textSize = 15f })
         }
-        root.addView(modeBox)
+        modeGroup.check(100 + c.mode)
+        root.addView(modeGroup)
+        root.addView(note("Carriles: el marco tiene que cubrir el área de juego de lado a lado (sin el puntaje de arriba). Si esquiva tarde, subí la anticipación; si esquiva demasiado temprano, bajala."))
         multiBox = CheckBox(this).apply {
             text = "Multitoque: tocar todos los círculos a la vez"; isChecked = c.multi; textSize = 15f
         }
@@ -185,11 +197,11 @@ class MainActivity : Activity() {
         val c = Engine.cfg
         geom.text = if (c.hasRegion)
             "Zona: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})" +
-                (if (c.mode == Cfg.MODE_FIXED) "  ·  Toque fijo en (${c.tx}, ${c.ty})" else "  ·  Toca sobre el color") +
+                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; else -> "  ·  Toca sobre el color" }) +
                 "\nToques hechos: ${Engine.tapCount}"
         else "Zona a vigilar: todavía sin configurar (se hace desde la burbuja)."
         sizeField.setText(c.minSize.toString()); hueField.setText(c.hueTol.toString())
-        cooldownField.setText(c.cooldownMs.toString()); modeBox.isChecked = c.mode == Cfg.MODE_FIXED
+        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString())
     }
 
     private fun saveSettings() {
@@ -201,7 +213,8 @@ class MainActivity : Activity() {
             color = col or (0xFF shl 24),
             hueTol = num(hueField, c.hueTol, 1, 90),
             minSize = num(sizeField, c.minSize, 2, 500),
-            mode = if (modeBox.isChecked) Cfg.MODE_FIXED else Cfg.MODE_ON_COLOR,
+            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 2),
+            reactMs = num(reactField, c.reactMs, 50, 2000),
             intervalMs = num(intervalField, c.intervalMs, 0, 5000),
             cooldownMs = num(cooldownField, c.cooldownMs, 0, 60000),
             repeat = repeatBox.isChecked,
