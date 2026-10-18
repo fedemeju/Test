@@ -220,6 +220,12 @@ class MainActivity : Activity() {
             repeat = repeatBox.isChecked,
             multi = multiBox.isChecked
         ))
+        // Al pasar a modo carriles con el rojo por defecto, usar el rosado de los bloques
+        val nc = Engine.cfg
+        if (nc.mode == Cfg.MODE_LANES && c.mode != Cfg.MODE_LANES && (nc.color and 0xFFFFFF) == 0xE53935) {
+            Engine.save(this, nc.copy(color = Cfg.PINK, hueTol = 20))
+            colorField.setText(String.format("#%06X", Cfg.PINK and 0xFFFFFF)); hueField.setText("20")
+        }
         updateSwatch()
         Toast.makeText(this, "Ajustes guardados", Toast.LENGTH_SHORT).show()
     }
