@@ -387,6 +387,12 @@ object Engine {
         return (h in 145f..205f) || (h in 10f..37f)
     }
 
+    /** Bloques: color intenso. Descarta resplandores/brillos apagados del fondo. */
+    private fun strongColor(r: Int, g: Int, b: Int): Boolean {
+        val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+        return mx >= 128 && (mx - mn) * 100 >= mx * 57
+    }
+
     private fun lanesFrame(
         buf: ByteBuffer, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
         scX: Float, scY: Float, now: Long, c: Cfg
@@ -416,7 +422,7 @@ object Engine {
                 sum += r + g + b
                 var t: Byte = when {
                     isShip(r, g, b) -> 2
-                    matches(r, g, b, c.hueTol) -> 1
+                    matches(r, g, b, c.hueTol) && strongColor(r, g, b) -> 1
                     else -> 0
                 }
                 if (t != 0.toByte() && ex.isNotEmpty()) {
@@ -474,10 +480,18 @@ object Engine {
         // Distancia (en celdas) desde la nave hasta el bloque más cercano en el carril l.
         // 0 = hay un bloque al lado de la nave. Los bloques que ya pasaron se ignoran.
         val INF = Int.MAX_VALUE
+        val maxRun = max(6, gh * 12 / 100)   // un bloque mide ~5% de alto; más de 12% no es un bloque
         fun distIn(l: Int, top: Int, bot: Int): Int {
             var gy = min(gh - 1, bot)
             while (gy >= 1) {
-                if (obsRow(l, gy) && obsRow(l, gy - 1)) return max(0, top - gy)
+                if (obsRow(l, gy) && obsRow(l, gy - 1)) {
+                    // medir el alto de la mancha
+                    var t = gy - 1
+                    while (t > 0 && obsRow(l, t - 1)) t--
+                    if (gy - t + 1 <= maxRun) return max(0, top - gy)
+                    gy = t - 1
+                    continue
+                }
                 gy--
             }
             return INF
