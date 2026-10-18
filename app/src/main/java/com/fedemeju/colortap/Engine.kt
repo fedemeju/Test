@@ -2,7 +2,9 @@ package com.fedemeju.colortap
 
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.service.quicksettings.TileService
@@ -10,37 +12,76 @@ import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /** Configuración guardada. Coordenadas en píxeles absolutos de pantalla. */
 data class Cfg(
     val rx: Int = -1, val ry: Int = -1, val rw: Int = 0, val rh: Int = 0, // sector a vigilar
-    val tx: Int = -1, val ty: Int = -1,                                    // dónde tocar
+    val tx: Int = -1, val ty: Int = -1,                                    // punto fijo (modo 1)
+    val mode: Int = MODE_ON_COLOR,
     val color: Int = Color.rgb(229, 57, 53),                               // color objetivo
-    val hueTol: Int = 15,        // tolerancia de tono (grados)
-    val minPct: Int = 30,        // % mínimo del sector que debe coincidir
+    val hueTol: Int = 18,        // tolerancia de tono (grados)
+    val minSize: Int = 20,       // tamaño mínimo de la mancha (px de diámetro aprox.)
     val intervalMs: Int = 30,    // cada cuánto se revisa la pantalla
-    val cooldownMs: Int = 300,   // espera mínima entre toques
-    val repeat: Boolean = false  // seguir tocando mientras el color siga ahí
+    val cooldownMs: Int = 80,    // espera mínima entre toques
+    val repeat: Boolean = false  // modo punto fijo: seguir tocando mientras siga el color
 ) {
-    val hasRegion get() = rw > 0 && rh > 0 && rx >= 0 && ry >= 0
+    val hasRegion get() = rw > 0 && rh > 0
     val hasTarget get() = tx >= 0 && ty >= 0
+    val ready get() = hasRegion && (mode == MODE_ON_COLOR || hasTarget)
+
+    companion object {
+        const val MODE_ON_COLOR = 0   // tocar encima de cada mancha del color
+        const val MODE_FIXED = 1      // tocar un punto fijo cuando aparece el color
+    }
 }
 
 object Engine {
     @Volatile var cfg = Cfg()
-    @Volatile var capturing = false   // captura de pantalla activa
-    @Volatile var active = false      // detección + toques activos
-    @Volatile var editing = false     // modo de ajuste de sector/punto
-    @Volatile var lastPct = 0         // % de coincidencia del último frame
+    @Volatile var capturing = false
+    @Volatile var active = false
+    @Volatile var editing = false
     @Volatile var sampleRequest = false
+
+    // Diagnóstico
+    @Volatile var lastBlobs = 0
     @Volatile var tapCount = 0
+    @Volatile var capW = 0
+    @Volatile var capH = 0
+    @Volatile var frames = 0
+    @Volatile var black = false
+
+    /** Zonas de pantalla ocupadas por nuestras propias ventanas (burbuja, panel). */
+    @Volatile var exclude: List<Rect> = emptyList()
+
+    /** Tamaño real de la pantalla (para convertir coordenadas de captura → toque). */
+    @Volatile var screenW = 0
+    @Volatile var screenH = 0
+
+    // Vista previa (sólo en modo ajuste)
+    @Volatile var previewRaw: IntArray? = null
+    @Volatile var previewW = 0
+    @Volatile var previewH = 0
+    private var lastPreview = 0L
 
     private var lastCheck = 0L
     private var lastTap = 0L
     private var wasMatch = false
-    private val hsv = FloatArray(3)
     private val thsv = FloatArray(3)
     private val main = Handler(Looper.getMainLooper())
+
+    // memoria de toques recientes para no repetir el mismo círculo
+    private val recentX = FloatArray(16)
+    private val recentY = FloatArray(16)
+    private val recentT = LongArray(16)
+    private var recentI = 0
+    private const val MEMORY_MS = 450L
+
+    // buffers reutilizables
+    private var grid = BooleanArray(0)
+    private var cols = IntArray(0)
+    private var queue = IntArray(0)
+    private var label = IntArray(0)
 
     // ---------- Persistencia ----------
     private const val P = "colortap"
@@ -52,11 +93,12 @@ object Engine {
             rx = p.getInt("rx", d.rx), ry = p.getInt("ry", d.ry),
             rw = p.getInt("rw", d.rw), rh = p.getInt("rh", d.rh),
             tx = p.getInt("tx", d.tx), ty = p.getInt("ty", d.ty),
+            mode = p.getInt("mode", d.mode),
             color = p.getInt("color", d.color),
-            hueTol = p.getInt("hueTol", d.hueTol),
-            minPct = p.getInt("minPct", d.minPct),
+            hueTol = p.getInt("hueTol2", d.hueTol),
+            minSize = p.getInt("minSize", d.minSize),
             intervalMs = p.getInt("intervalMs", d.intervalMs),
-            cooldownMs = p.getInt("cooldownMs", d.cooldownMs),
+            cooldownMs = p.getInt("cooldownMs2", d.cooldownMs),
             repeat = p.getBoolean("repeat", d.repeat)
         )
     }
@@ -65,16 +107,17 @@ object Engine {
         cfg = c
         ctx.getSharedPreferences(P, Context.MODE_PRIVATE).edit()
             .putInt("rx", c.rx).putInt("ry", c.ry).putInt("rw", c.rw).putInt("rh", c.rh)
-            .putInt("tx", c.tx).putInt("ty", c.ty).putInt("color", c.color)
-            .putInt("hueTol", c.hueTol).putInt("minPct", c.minPct)
-            .putInt("intervalMs", c.intervalMs).putInt("cooldownMs", c.cooldownMs)
+            .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
+            .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
+            .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
             .putBoolean("repeat", c.repeat).apply()
     }
 
     // ---------- Estado ----------
     fun setActive(ctx: Context, on: Boolean) {
-        active = on && capturing && !editing && cfg.hasRegion && cfg.hasTarget
+        active = on && capturing && !editing && cfg.ready
         wasMatch = false
+        recentT.fill(0)
         stateChanged(ctx)
     }
 
@@ -87,20 +130,46 @@ object Engine {
         }
     }
 
-    // ---------- Detección (se llama desde el hilo de captura) ----------
+    // ---------- Color ----------
+    /** Devuelve true si el píxel r,g,b coincide con el color objetivo (thsv). */
+    private fun matches(r: Int, g: Int, b: Int, hueTol: Int): Boolean {
+        val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+        val v = mx / 255f
+        val s = if (mx == 0) 0f else (mx - mn).toFloat() / mx
+        val ts = thsv[1]; val tv = thsv[2]
+        if (ts < 0.2f) return s < 0.25f && abs(v - tv) < 0.2f   // blanco/gris/negro
+        if (s < max(0.25f, ts - 0.4f) || v < max(0.15f, tv - 0.45f) || v > tv + 0.45f) return false
+        val d = (mx - mn).toFloat()
+        var h = when (mx) {
+            r -> 60f * (((g - b) / d) % 6f)
+            g -> 60f * (((b - r) / d) + 2f)
+            else -> 60f * (((r - g) / d) + 4f)
+        }
+        if (h < 0) h += 360f
+        var dh = abs(h - thsv[0])
+        if (dh > 180f) dh = 360f - dh
+        return dh <= hueTol
+    }
+
+    // ---------- Detección (hilo de captura) ----------
     fun onFrame(ctx: Context, buf: ByteBuffer, w: Int, h: Int, rowStride: Int, pixStride: Int) {
         if (!active && !editing) return
         val now = System.currentTimeMillis()
         val c = cfg
         if (now - lastCheck < c.intervalMs) return
         lastCheck = now
+        frames++
+        capW = w; capH = h
         if (!c.hasRegion) return
 
-        // En modo edición el marco se dibuja sobre el sector: lo excluimos
-        val inset = if (editing) ClickerService.BORDER_PX else 0
-        val x0 = max(0, c.rx + inset); val y0 = max(0, c.ry + inset)
-        val x1 = min(w, c.rx + c.rw - inset); val y1 = min(h, c.ry + c.rh - inset)
-        if (x1 <= x0 || y1 <= y0) return
+        // escala captura → pantalla (normalmente 1)
+        val scX = if (screenW > 0) screenW.toFloat() / w else 1f
+        val scY = if (screenH > 0) screenH.toFloat() / h else 1f
+
+        val inset = if (editing) ClickerService.BORDER_PX + 2 else 0
+        val x0 = max(0, ((c.rx + inset) / scX).toInt()); val y0 = max(0, ((c.ry + inset) / scY).toInt())
+        val x1 = min(w, ((c.rx + c.rw - inset) / scX).toInt()); val y1 = min(h, ((c.ry + c.rh - inset) / scY).toInt())
+        if (x1 - x0 < 2 || y1 - y0 < 2) return
 
         if (sampleRequest) {
             sampleRequest = false
@@ -110,46 +179,151 @@ object Engine {
             return
         }
 
+        // Grilla de muestreo: ~1 muestra cada 'step' píxeles
+        val area = (x1 - x0).toLong() * (y1 - y0)
+        var step = max(2, sqrt(area / 60000.0).toInt() + 1)
+        step = min(step, max(2, c.minSize / 3))
+        val gw = (x1 - x0 + step - 1) / step
+        val gh = (y1 - y0 + step - 1) / step
+        val n = gw * gh
+        if (grid.size < n) { grid = BooleanArray(n); cols = IntArray(n); queue = IntArray(n); label = IntArray(n) }
+
         Color.colorToHSV(c.color, thsv)
-        val sx = max(1, (x1 - x0) / 60); val sy = max(1, (y1 - y0) / 60)
-        var total = 0; var hits = 0
-        var y = y0
-        while (y < y1) {
-            var x = x0
+        val ex = exclude
+        var sum = 0L
+        var idx = 0
+        for (gy in 0 until gh) {
+            val y = y0 + gy * step
             val row = y * rowStride
-            while (x < x1) {
+            for (gx in 0 until gw) {
+                val x = x0 + gx * step
                 val i = row + x * pixStride
                 val r = buf.get(i).toInt() and 0xff
                 val g = buf.get(i + 1).toInt() and 0xff
                 val b = buf.get(i + 2).toInt() and 0xff
-                Color.RGBToHSV(r, g, b, hsv)
-                if (matches(hsv, thsv, c.hueTol)) hits++
-                total++
-                x += sx
+                cols[idx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+                sum += r + g + b
+                var m = matches(r, g, b, c.hueTol)
+                if (m && ex.isNotEmpty()) {
+                    val sx = (x * scX).toInt(); val sy = (y * scY).toInt()
+                    for (rc in ex) if (rc.contains(sx, sy)) { m = false; break }
+                }
+                grid[idx] = m
+                label[idx] = 0
+                idx++
             }
-            y += sy
         }
-        val pct = if (total == 0) 0 else hits * 100 / total
-        lastPct = pct
+        black = sum < n * 6L
+
+        // Componentes conectados (manchas del color)
+        val minCells = max(1, ((c.minSize.toFloat() / step) * (c.minSize.toFloat() / step) * 0.4f).toInt())
+        var blobs = 0
+        var bestX = 0f; var bestY = 0f; var bestSize = 0
+        var bestFreshX = 0f; var bestFreshY = 0f; var bestFreshSize = 0
+        var lab = 0
+        for (start in 0 until n) {
+            if (!grid[start] || label[start] != 0) continue
+            lab++
+            var qh = 0; var qt = 0
+            queue[qt++] = start; label[start] = lab
+            var cnt = 0; var sxs = 0L; var sys = 0L
+            while (qh < qt) {
+                val p = queue[qh++]
+                val px = p % gw; val py = p / gw
+                cnt++; sxs += px; sys += py
+                if (px > 0) { val q = p - 1; if (grid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (px < gw - 1) { val q = p + 1; if (grid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py > 0) { val q = p - gw; if (grid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py < gh - 1) { val q = p + gw; if (grid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+            }
+            if (cnt < minCells) continue
+            blobs++
+            val cx = (x0 + (sxs.toFloat() / cnt) * step + step / 2f) * scX
+            val cy = (y0 + (sys.toFloat() / cnt) * step + step / 2f) * scY
+            if (cnt > bestSize) { bestSize = cnt; bestX = cx; bestY = cy }
+            if (cnt > bestFreshSize && !recentlyTapped(cx, cy, sqrt(cnt.toFloat()) * step * scX, now)) {
+                bestFreshSize = cnt; bestFreshX = cx; bestFreshY = cy
+            }
+        }
+        lastBlobs = blobs
+
+        if (editing && now - lastPreview > 300) {
+            lastPreview = now
+            buildPreview(gw, gh, n)
+        }
 
         if (!active) return
-        val match = pct >= c.minPct
-        if (match && (c.repeat || !wasMatch) && now - lastTap >= c.cooldownMs) {
-            lastTap = now
-            tapCount++
-            ClickerService.instance?.tap(c.tx.toFloat(), c.ty.toFloat())
+        if (now - lastTap < c.cooldownMs) return
+
+        if (c.mode == Cfg.MODE_ON_COLOR) {
+            if (bestFreshSize > 0) {
+                lastTap = now
+                remember(bestFreshX, bestFreshY, now)
+                tapCount++
+                ClickerService.instance?.tap(bestFreshX, bestFreshY)
+            }
+        } else {
+            val match = blobs > 0
+            if (match && (c.repeat || !wasMatch)) {
+                lastTap = now
+                tapCount++
+                ClickerService.instance?.tap(c.tx.toFloat(), c.ty.toFloat())
+            }
+            wasMatch = match
         }
-        wasMatch = match
     }
 
-    private fun matches(p: FloatArray, t: FloatArray, hueTol: Int): Boolean {
-        // Colores sin saturación (blanco, gris, negro): comparar sólo brillo
-        if (t[1] < 0.2f) return p[1] < 0.25f && abs(p[2] - t[2]) < 0.2f
-        var dh = abs(p[0] - t[0])
-        if (dh > 180f) dh = 360f - dh
-        return dh <= hueTol &&
-            p[1] >= max(0.2f, t[1] - 0.35f) &&
-            abs(p[2] - t[2]) <= 0.4f
+    private fun recentlyTapped(x: Float, y: Float, radius: Float, now: Long): Boolean {
+        val r = max(radius, 30f)
+        for (i in recentT.indices) {
+            if (now - recentT[i] > MEMORY_MS) continue
+            val dx = recentX[i] - x; val dy = recentY[i] - y
+            if (dx * dx + dy * dy < r * r) return true
+        }
+        return false
+    }
+
+    private fun remember(x: Float, y: Float, now: Long) {
+        recentX[recentI] = x; recentY[recentI] = y; recentT[recentI] = now
+        recentI = (recentI + 1) % recentT.size
+    }
+
+    /** Arma una imagen chica del sector: colores reales, y en verde lo detectado. */
+    private fun buildPreview(gw: Int, gh: Int, n: Int) {
+        val raw = cols.copyOf(n)
+        val shown = IntArray(n)
+        for (i in 0 until n) {
+            if (grid[i]) shown[i] = Color.rgb(0, 255, 90)
+            else {
+                val c = raw[i]
+                // atenuado para que lo detectado resalte
+                val r = (Color.red(c) * 0.55f).toInt(); val g = (Color.green(c) * 0.55f).toInt(); val b = (Color.blue(c) * 0.55f).toInt()
+                shown[i] = Color.rgb(r, g, b)
+            }
+        }
+        previewRaw = raw; previewW = gw; previewH = gh
+        val bmp = try { Bitmap.createBitmap(shown, gw, gh, Bitmap.Config.ARGB_8888) } catch (_: Exception) { return }
+        main.post { ClickerService.instance?.onPreview(bmp) }
+    }
+
+    /** Toma el color de la vista previa en la posición relativa (0..1). */
+    fun pickFromPreview(ctx: Context, fx: Float, fy: Float): Int? {
+        val raw = previewRaw ?: return null
+        val w = previewW; val h = previewH
+        if (w == 0 || h == 0) return null
+        val px = (fx * w).toInt().coerceIn(0, w - 1)
+        val py = (fy * h).toInt().coerceIn(0, h - 1)
+        // promedio 3x3 para evitar bordes
+        var r = 0; var g = 0; var b = 0; var k = 0
+        for (dy in -1..1) for (dx in -1..1) {
+            val x = px + dx; val y = py + dy
+            if (x in 0 until w && y in 0 until h) {
+                val c = raw[y * w + x]; r += Color.red(c); g += Color.green(c); b += Color.blue(c); k++
+            }
+        }
+        val col = Color.rgb(r / k, g / k, b / k)
+        save(ctx, cfg.copy(color = col))
+        return col
     }
 
     private fun sampleCenter(buf: ByteBuffer, x0: Int, y0: Int, x1: Int, y1: Int, rs: Int, ps: Int): Int {

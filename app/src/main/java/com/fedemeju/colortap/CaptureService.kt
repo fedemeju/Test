@@ -21,7 +21,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
-import android.view.WindowManager
+import android.view.Display
 
 /** Servicio en primer plano que captura la pantalla y pasa cada frame a Engine. */
 class CaptureService : Service() {
@@ -44,6 +44,7 @@ class CaptureService : Service() {
     private lateinit var handler: Handler
     private var curW = 0
     private var curH = 0
+    private var lastSizeCheck = 0L
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(id: Int) {}
@@ -108,6 +109,8 @@ class CaptureService : Service() {
         r.setOnImageAvailableListener({ rd ->
             val img = try { rd.acquireLatestImage() } catch (_: Exception) { null } ?: return@setOnImageAvailableListener
             try {
+                val now = System.currentTimeMillis()
+                if (now - lastSizeCheck > 700) { lastSizeCheck = now; handler.post { resizeIfNeeded() } }
                 val plane = img.planes[0]
                 Engine.onFrame(this, plane.buffer, img.width, img.height, plane.rowStride, plane.pixelStride)
             } catch (_: Exception) {
@@ -132,17 +135,14 @@ class CaptureService : Service() {
         old?.close()
     }
 
+    /** Tamaño real de la pantalla en su orientación actual. */
+    @Suppress("DEPRECATION")
     private fun screenSize(): Triple<Int, Int, Int> {
-        val wm = getSystemService(WindowManager::class.java)
-        val dpi = resources.displayMetrics.densityDpi
-        return if (Build.VERSION.SDK_INT >= 30) {
-            val b = wm.maximumWindowMetrics.bounds
-            Triple(b.width(), b.height(), dpi)
-        } else {
-            val m = DisplayMetrics()
-            @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(m)
-            Triple(m.widthPixels, m.heightPixels, dpi)
-        }
+        val d = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+        val m = DisplayMetrics()
+        d.getRealMetrics(m)
+        Engine.screenW = m.widthPixels; Engine.screenH = m.heightPixels
+        return Triple(m.widthPixels, m.heightPixels, m.densityDpi)
     }
 
     private fun startAsForeground() {

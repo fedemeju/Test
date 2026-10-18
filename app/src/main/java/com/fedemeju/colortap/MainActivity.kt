@@ -33,7 +33,8 @@ class MainActivity : Activity() {
     private lateinit var colorField: EditText
     private lateinit var swatch: View
     private lateinit var hueField: EditText
-    private lateinit var pctField: EditText
+    private lateinit var sizeField: EditText
+    private lateinit var modeBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
     private lateinit var repeatBox: CheckBox
@@ -95,9 +96,10 @@ class MainActivity : Activity() {
         root.addView(title("3. Cómo se usa"))
         root.addView(note(
             "• Aparece una burbuja flotante encima de todo.\n" +
-            "• Mantenela apretada → modo ajuste: movés el marco amarillo sobre el sector a vigilar (esquina de abajo a la derecha para cambiar el tamaño) y la mira celeste adonde querés que toque.\n" +
-            "• Con lo que buscás visible dentro del marco, tocá \"Tomar color\". El panel te muestra el % de coincidencia en vivo.\n" +
-            "• \"Guardar\" y después tocá la burbuja: verde = activo, gris = pausa.\n" +
+            "• En el juego, mantenela apretada → modo ajuste. El marco amarillo es la zona que se vigila: arrastralo para moverlo, el triángulo de la esquina cambia el tamaño, o tocá \"Pantalla entera\".\n" +
+            "• El panel muestra una vista previa de lo que ve la app: lo pintado en VERDE es lo que detecta. Si los círculos no se pintan de verde, tocá uno en la vista previa para tomar su color exacto.\n" +
+            "• \"Guardar\" y después tocá la burbuja: azul = activo, gris = pausa. Cada toque hace parpadear la burbuja.\n" +
+            "• Modo \"tocar el color\": toca encima de cada círculo que aparece. Modo \"punto fijo\": cuando aparece el color, toca siempre en la mira celeste.\n" +
             "• También podés agregar el botón \"ColorTap\" en los ajustes rápidos (menú que bajás desde arriba)."))
 
         geom = note("")
@@ -126,14 +128,18 @@ class MainActivity : Activity() {
         root.addView(presets)
 
         hueField = field("Tolerancia de tono (°)", c.hueTol.toString())
-        pctField = field("% mínimo del sector", c.minPct.toString())
+        sizeField = field("Tamaño mínimo del círculo (px)", c.minSize.toString())
         intervalField = field("Revisar cada (ms)", c.intervalMs.toString())
         cooldownField = field("Espera entre toques (ms)", c.cooldownMs.toString())
+        modeBox = CheckBox(this).apply {
+            text = "Modo punto fijo (en vez de tocar sobre el color)"; isChecked = c.mode == Cfg.MODE_FIXED; textSize = 15f
+        }
+        root.addView(modeBox)
         repeatBox = CheckBox(this).apply {
-            text = "Seguir tocando mientras el color siga ahí"; isChecked = c.repeat; textSize = 15f
+            text = "Punto fijo: seguir tocando mientras el color siga ahí"; isChecked = c.repeat; textSize = 15f
         }
         root.addView(repeatBox)
-        root.addView(note("Sin tildar: toca una sola vez cada vez que el color aparece."))
+        root.addView(note("Si toca cosas que no son círculos, subí el tamaño mínimo o bajá la tolerancia. Si no detecta, hacé lo contrario."))
         root.addView(Button(this).apply { text = "Guardar ajustes"; setOnClickListener { saveSettings() } })
 
         setContentView(ScrollView(this).apply { addView(root) })
@@ -171,9 +177,13 @@ class MainActivity : Activity() {
         a11yBtn.text = if (a11y) "Accesibilidad: activada ✔" else "Abrir ajustes de accesibilidad"
         startBtn.text = if (Engine.capturing) "Detener" else "Iniciar captura"
         val c = Engine.cfg
-        geom.text = if (c.hasRegion && c.hasTarget)
-            "Sector: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})  ·  Toque en (${c.tx}, ${c.ty})"
-        else "Sector y punto de toque: todavía sin configurar (se hace desde la burbuja)."
+        geom.text = if (c.hasRegion)
+            "Zona: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})" +
+                (if (c.mode == Cfg.MODE_FIXED) "  ·  Toque fijo en (${c.tx}, ${c.ty})" else "  ·  Toca sobre el color") +
+                "\nToques hechos: ${Engine.tapCount}"
+        else "Zona a vigilar: todavía sin configurar (se hace desde la burbuja)."
+        sizeField.setText(c.minSize.toString()); hueField.setText(c.hueTol.toString())
+        cooldownField.setText(c.cooldownMs.toString()); modeBox.isChecked = c.mode == Cfg.MODE_FIXED
     }
 
     private fun saveSettings() {
@@ -184,7 +194,8 @@ class MainActivity : Activity() {
         Engine.save(this, c.copy(
             color = col or (0xFF shl 24),
             hueTol = num(hueField, c.hueTol, 1, 90),
-            minPct = num(pctField, c.minPct, 1, 100),
+            minSize = num(sizeField, c.minSize, 2, 500),
+            mode = if (modeBox.isChecked) Cfg.MODE_FIXED else Cfg.MODE_ON_COLOR,
             intervalMs = num(intervalField, c.intervalMs, 0, 5000),
             cooldownMs = num(cooldownField, c.cooldownMs, 0, 60000),
             repeat = repeatBox.isChecked

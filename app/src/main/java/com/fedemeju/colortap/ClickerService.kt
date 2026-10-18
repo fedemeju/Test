@@ -5,12 +5,15 @@ import android.accessibilityservice.GestureDescription
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
@@ -22,11 +25,13 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Servicio de accesibilidad: dibuja la burbuja flotante y el modo de ajuste,
@@ -52,8 +57,12 @@ class ClickerService : AccessibilityService() {
     private var crossLp: WindowManager.LayoutParams? = null
     private var panel: LinearLayout? = null
     private var panelLp: WindowManager.LayoutParams? = null
-    private var pctText: TextView? = null
+    private var infoText: TextView? = null
     private var swatch: View? = null
+    private var preview: ImageView? = null
+    private var modeBtn: Button? = null
+
+    private var flashUntil = 0L
 
     private fun dp(v: Float) = (v * density).toInt()
 
@@ -82,24 +91,37 @@ class ClickerService : AccessibilityService() {
         main.post {
             val path = Path().apply { moveTo(x, y) }
             val g = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 40))
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
                 .build()
             dispatchGesture(g, null, null)
+            flashUntil = System.currentTimeMillis() + 120
+            bubble?.invalidate()
+            main.postDelayed({ bubble?.invalidate() }, 130)
         }
     }
 
     // ---------- Estado general ----------
-    /** Muestra la burbuja sólo mientras la captura está activa. */
     fun refresh() {
         if (Engine.capturing) showBubble() else { exitEdit(save = false); removeBubble() }
         bubble?.invalidate()
+        updateExclude()
     }
 
-    private fun lp(w: Int, h: Int, touchable: Boolean = true): WindowManager.LayoutParams {
-        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+    /** Le dice al detector qué zonas son nuestras (para no detectarlas). */
+    private fun updateExclude() {
+        val list = ArrayList<Rect>()
+        for (v in listOf<View?>(bubble, panel)) {
+            if (v == null || v.width == 0) continue
+            val l = IntArray(2); v.getLocationOnScreen(l)
+            list.add(Rect(l[0], l[1], l[0] + v.width, l[1] + v.height))
+        }
+        Engine.exclude = list
+    }
+
+    private fun lp(w: Int, h: Int): WindowManager.LayoutParams {
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        if (!touchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         return WindowManager.LayoutParams(
             w, h, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, flags, PixelFormat.TRANSLUCENT
         ).apply {
@@ -112,32 +134,34 @@ class ClickerService : AccessibilityService() {
         }
     }
 
-    private fun screenW() = resources.displayMetrics.widthPixels
-    private fun screenH() = resources.displayMetrics.heightPixels
+    private fun screenW() = if (Engine.screenW > 0) Engine.screenW else resources.displayMetrics.widthPixels
+    private fun screenH() = if (Engine.screenH > 0) Engine.screenH else resources.displayMetrics.heightPixels
 
     // ---------- Burbuja ----------
     private fun showBubble() {
         if (bubble != null) return
-        val size = dp(56f)
-        val p = lp(size, size).apply { x = dp(8f); y = screenH() / 3 }
+        val size = dp(52f)
+        val p = lp(size, size).apply { x = dp(4f); y = screenH() / 3 }
         val v = BubbleView(this)
         bubble = v; bubbleLp = p
         wm.addView(v, p)
+        main.postDelayed({ updateExclude() }, 300)
     }
 
     private fun removeBubble() {
         bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         bubble = null
+        updateExclude()
     }
 
     private fun onBubbleTap() {
         if (Engine.editing) { exitEdit(save = true); return }
-        val c = Engine.cfg
-        if (!c.hasRegion || !c.hasTarget) {
-            Toast.makeText(this, "Primero mantené apretada la burbuja para elegir el sector y el punto", Toast.LENGTH_LONG).show()
+        if (!Engine.cfg.ready) {
+            Toast.makeText(this, "Primero mantené apretada la burbuja para elegir el sector", Toast.LENGTH_LONG).show()
             return
         }
         Engine.setActive(this, !Engine.active)
+        Toast.makeText(this, if (Engine.active) "ColorTap ACTIVO" else "ColorTap en pausa", Toast.LENGTH_SHORT).show()
     }
 
     private fun onBubbleLongPress() {
@@ -149,7 +173,6 @@ class ClickerService : AccessibilityService() {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var downX = 0f; private var downY = 0f
         private var startX = 0; private var startY = 0
-        private var downTime = 0L
         private var dragging = false
         private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
         private val longPress = Runnable { if (!dragging) { dragging = true; performHapticFeedback(0); onBubbleLongPress() } }
@@ -157,12 +180,14 @@ class ClickerService : AccessibilityService() {
         override fun onDraw(canvas: Canvas) {
             val r = width / 2f
             paint.style = Paint.Style.FILL
+            // Gris / azul / amarillo: nunca colores que se confundan con lo que se busca
             paint.color = when {
                 Engine.editing -> Color.rgb(255, 179, 0)
-                Engine.active -> Color.rgb(67, 160, 71)
+                System.currentTimeMillis() < flashUntil -> Color.WHITE
+                Engine.active -> Color.rgb(30, 136, 229)
                 else -> Color.rgb(97, 97, 97)
             }
-            paint.alpha = 220
+            paint.alpha = 225
             canvas.drawCircle(r, r, r - dp(2f), paint)
             paint.alpha = 255
             paint.color = Color.WHITE
@@ -170,16 +195,15 @@ class ClickerService : AccessibilityService() {
             paint.strokeWidth = dp(2f).toFloat()
             canvas.drawCircle(r, r, r - dp(3f), paint)
             paint.style = Paint.Style.FILL
+            if (System.currentTimeMillis() < flashUntil) paint.color = Color.rgb(30, 136, 229)
             if (Engine.editing) {
                 paint.textSize = dp(13f).toFloat(); paint.textAlign = Paint.Align.CENTER
                 canvas.drawText("OK", r, r + dp(5f), paint)
             } else if (Engine.active) {
-                // pausa
                 val w = dp(5f).toFloat(); val h = dp(18f).toFloat()
                 canvas.drawRect(r - w * 1.6f, r - h / 2, r - w * 0.6f, r + h / 2, paint)
                 canvas.drawRect(r + w * 0.6f, r - h / 2, r + w * 1.6f, r + h / 2, paint)
             } else {
-                // play
                 val s = dp(10f).toFloat()
                 val tri = Path().apply {
                     moveTo(r - s * 0.7f, r - s); lineTo(r - s * 0.7f, r + s); lineTo(r + s, r); close()
@@ -194,7 +218,7 @@ class ClickerService : AccessibilityService() {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY; startX = p.x; startY = p.y
-                    downTime = System.currentTimeMillis(); dragging = false
+                    dragging = false
                     postDelayed(longPress, 550)
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -202,7 +226,7 @@ class ClickerService : AccessibilityService() {
                     if (!dragging && (abs(dx) > slop || abs(dy) > slop)) {
                         dragging = true; removeCallbacks(longPress)
                     }
-                    if (dragging && System.currentTimeMillis() - downTime >= 0) {
+                    if (dragging) {
                         p.x = startX + dx.toInt(); p.y = startY + dy.toInt()
                         try { wm.updateViewLayout(this, p) } catch (_: Exception) {}
                     }
@@ -210,6 +234,7 @@ class ClickerService : AccessibilityService() {
                 MotionEvent.ACTION_UP -> {
                     removeCallbacks(longPress)
                     if (!dragging) onBubbleTap()
+                    main.postDelayed({ updateExclude() }, 100)
                 }
                 MotionEvent.ACTION_CANCEL -> removeCallbacks(longPress)
             }
@@ -226,31 +251,41 @@ class ClickerService : AccessibilityService() {
 
         val c = Engine.cfg
         val sw = screenW(); val sh = screenH()
-        val def = dp(90f)
-        val bw = if (c.hasRegion) c.rw else def
-        val bh = if (c.hasRegion) c.rh else def
-        val bx = if (c.hasRegion) c.rx else sw / 2 - def / 2
-        val by = if (c.hasRegion) c.ry else sh / 2 - def / 2
+        val bw: Int; val bh: Int; val bx: Int; val by: Int
+        if (c.hasRegion && c.rx + c.rw <= sw + 4 && c.ry + c.rh <= sh + 4) {
+            bw = c.rw; bh = c.rh; bx = c.rx; by = c.ry
+        } else {
+            // por defecto: casi toda la pantalla
+            bw = (sw * 0.8f).toInt(); bh = (sh * 0.7f).toInt(); bx = (sw - bw) / 2; by = (sh - bh) / 2
+        }
 
-        // Marco del sector
         val bLp = lp(bw, bh).apply { x = bx; y = by }
         val b = BoxView(this)
         box = b; boxLp = bLp
         wm.addView(b, bLp)
 
-        // Mira del punto de toque
+        if (c.mode == Cfg.MODE_FIXED) showCross()
+        showPanel()
+        bubble?.invalidate()
+        main.postDelayed({ saveGeometry() }, 200)
+        main.post(infoUpdater)
+    }
+
+    private fun showCross() {
+        if (cross != null) return
+        val c = Engine.cfg
         val cs = dp(48f)
-        val tx = if (c.hasTarget) c.tx else sw / 2
-        val ty = if (c.hasTarget) c.ty else sh / 2 + def
+        val tx = if (c.hasTarget) c.tx else screenW() / 2
+        val ty = if (c.hasTarget) c.ty else screenH() / 2
         val cLp = lp(cs, cs).apply { x = tx - cs / 2; y = ty - cs / 2 }
         val cr = CrossView(this)
         cross = cr; crossLp = cLp
         wm.addView(cr, cLp)
+    }
 
-        // Panel de herramientas
-        showPanel()
-        bubble?.invalidate()
-        main.post(pctUpdater)
+    private fun hideCross() {
+        cross?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        cross = null
     }
 
     private fun showPanel() {
@@ -258,7 +293,7 @@ class ClickerService : AccessibilityService() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
             background = GradientDrawable().apply {
-                setColor(Color.argb(230, 30, 30, 36)); cornerRadius = dp(12f).toFloat()
+                setColor(Color.argb(235, 30, 30, 36)); cornerRadius = dp(12f).toFloat()
             }
         }
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -270,29 +305,61 @@ class ClickerService : AccessibilityService() {
         swatch = sv
         top.addView(sv, LinearLayout.LayoutParams(dp(22f), dp(22f)))
         val tv = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 13f; setPadding(dp(8f), 0, 0, 0)
-            text = "Coincide: --%   (arrastrá acá para mover)"
+            setTextColor(Color.WHITE); textSize = 12.5f; setPadding(dp(8f), 0, 0, 0)
+            text = "Analizando…"
         }
-        pctText = tv
+        infoText = tv
         top.addView(tv)
         pnl.addView(top)
 
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun btn(label: String, onClick: () -> Unit) = Button(this).apply {
-            text = label; textSize = 12f; isAllCaps = false; setOnClickListener { onClick() }
+        // Vista previa: lo que ve la app dentro del marco (verde = detectado)
+        val pv = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            setBackgroundColor(Color.BLACK)
         }
-        row.addView(btn("Tomar color") {
-            Engine.sampleRequest = true
-            saveGeometry()
+        pv.setOnTouchListener { v, e ->
+            if (e.actionMasked == MotionEvent.ACTION_UP) {
+                val d = (v as ImageView).drawable
+                if (d != null && d.intrinsicWidth > 0) {
+                    // convertir toque en la vista → posición en la imagen (FIT_CENTER)
+                    val s = min(v.width.toFloat() / d.intrinsicWidth, v.height.toFloat() / d.intrinsicHeight)
+                    val iw = d.intrinsicWidth * s; val ih = d.intrinsicHeight * s
+                    val ox = (v.width - iw) / 2; val oy = (v.height - ih) / 2
+                    val fx = (e.x - ox) / iw; val fy = (e.y - oy) / ih
+                    if (fx in 0f..1f && fy in 0f..1f) {
+                        Engine.pickFromPreview(this, fx, fy)?.let { onColorSampled(it) }
+                    }
+                }
+            }
+            true
+        }
+        preview = pv
+        pnl.addView(pv, LinearLayout.LayoutParams(dp(200f), dp(130f)).apply { topMargin = dp(6f) })
+        pnl.addView(TextView(this).apply {
+            setTextColor(Color.LTGRAY); textSize = 11f
+            text = "Tocá un círculo en esta vista para tomar su color"
         })
-        row.addView(btn("Probar toque") { testTap() })
-        row.addView(btn("Guardar") { exitEdit(save = true) })
-        pnl.addView(row)
+
+        fun btn(label: String, onClick: () -> Unit) = Button(this).apply {
+            text = label; textSize = 11.5f; isAllCaps = false; minWidth = 0; minimumWidth = 0
+            setPadding(dp(8f), 0, dp(8f), 0)
+            setOnClickListener { onClick() }
+        }
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val mb = btn(modeLabel()) { toggleMode() }
+        modeBtn = mb
+        row1.addView(mb)
+        row1.addView(btn("Pantalla entera") { fullScreenBox() })
+        pnl.addView(row1)
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row2.addView(btn("Probar toque") { testTap() })
+        row2.addView(btn("Guardar") { exitEdit(save = true) })
+        pnl.addView(row2)
 
         val p = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT).apply {
-            x = dp(12f); y = dp(40f)
+            x = dp(8f); y = dp(30f)
         }
-        // Arrastrar el panel desde el texto
         var dx = 0f; var dy = 0f; var sx = 0; var sy = 0
         top.setOnTouchListener { _, e ->
             when (e.actionMasked) {
@@ -301,37 +368,85 @@ class ClickerService : AccessibilityService() {
                     p.x = sx + (e.rawX - dx).toInt(); p.y = sy + (e.rawY - dy).toInt()
                     try { wm.updateViewLayout(pnl, p) } catch (_: Exception) {}
                 }
+                MotionEvent.ACTION_UP -> updateExclude()
             }
             true
         }
         panel = pnl; panelLp = p
         wm.addView(pnl, p)
+        main.postDelayed({ updateExclude() }, 300)
     }
 
-    private val pctUpdater = object : Runnable {
+    private fun modeLabel() =
+        if (Engine.cfg.mode == Cfg.MODE_ON_COLOR) "Modo: tocar el color" else "Modo: punto fijo"
+
+    private fun toggleMode() {
+        saveGeometry()
+        val c = Engine.cfg
+        val nm = if (c.mode == Cfg.MODE_ON_COLOR) Cfg.MODE_FIXED else Cfg.MODE_ON_COLOR
+        Engine.save(this, c.copy(mode = nm))
+        if (nm == Cfg.MODE_FIXED) {
+            showCross()
+            Toast.makeText(this, "Mové la mira celeste adonde querés que toque", Toast.LENGTH_LONG).show()
+        } else hideCross()
+        modeBtn?.text = modeLabel()
+        // el panel tiene que quedar arriba de la mira
+        panel?.let { pn -> panelLp?.let { pl -> try { wm.removeView(pn); wm.addView(pn, pl) } catch (_: Exception) {} } }
+    }
+
+    private fun fullScreenBox() {
+        val b = box ?: return
+        val p = boxLp ?: return
+        p.x = 0; p.y = 0; p.width = screenW(); p.height = screenH()
+        try { wm.updateViewLayout(b, p) } catch (_: Exception) {}
+        // reordenar para que el panel y la mira queden encima
+        for ((v, l) in listOf(cross to crossLp, panel to panelLp)) {
+            if (v != null && l != null) try { wm.removeView(v); wm.addView(v, l) } catch (_: Exception) {}
+        }
+        main.postDelayed({ saveGeometry(); updateExclude() }, 250)
+    }
+
+    private val infoUpdater = object : Runnable {
         override fun run() {
             if (!Engine.editing) return
             saveGeometry()
-            pctText?.text = "Coincide: ${Engine.lastPct}%  (mínimo ${Engine.cfg.minPct}%)"
-            main.postDelayed(this, 250)
+            val txt = when {
+                Engine.frames == 0 -> "⚠️ No llegan imágenes de la pantalla.\nDetené y volvé a iniciar la captura."
+                Engine.black -> "⚠️ La captura sale NEGRA: este juego\nbloquea la captura de pantalla."
+                else -> "Círculos detectados: ${Engine.lastBlobs}\nCaptura ${Engine.capW}×${Engine.capH}"
+            }
+            infoText?.text = txt
+            main.postDelayed(this, 300)
         }
+    }
+
+    fun onPreview(bmp: Bitmap) {
+        val pv = preview ?: return
+        val d = BitmapDrawable(resources, bmp).apply { paint.isFilterBitmap = false }
+        pv.setImageDrawable(d)
     }
 
     fun onColorSampled(col: Int) {
         (swatch?.background as? GradientDrawable)?.setColor(col)
-        Toast.makeText(this, String.format("Color tomado: #%06X", col and 0xFFFFFF), Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, String.format("Color elegido: #%06X", col and 0xFFFFFF), Toast.LENGTH_SHORT).show()
     }
 
     private fun testTap() {
+        val c = Engine.cfg
+        val x: Float; val y: Float
+        if (c.mode == Cfg.MODE_FIXED) {
+            saveGeometry()
+            x = c.tx.toFloat(); y = c.ty.toFloat()
+        } else {
+            Toast.makeText(this, "En modo \"tocar el color\" se toca sobre cada círculo. Guardá y activá la burbuja.", Toast.LENGTH_LONG).show()
+            return
+        }
         val cr = cross ?: return
         val p = crossLp ?: return
-        saveGeometry()
-        // Hacer la mira "transparente" al toque, tocar y restaurar
         p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         try { wm.updateViewLayout(cr, p) } catch (_: Exception) {}
-        val c = Engine.cfg
         main.postDelayed({
-            tap(c.tx.toFloat(), c.ty.toFloat())
+            tap(x, y)
             main.postDelayed({
                 p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
                 try { wm.updateViewLayout(cr, p) } catch (_: Exception) {}
@@ -339,29 +454,31 @@ class ClickerService : AccessibilityService() {
         }, 80)
     }
 
-    /** Guarda la posición actual del marco y la mira. */
+    /** Guarda la posición actual del marco (y de la mira, si está). */
     private fun saveGeometry() {
         val b = box ?: return
-        val cr = cross ?: return
+        if (b.width == 0) return
         val bl = IntArray(2); b.getLocationOnScreen(bl)
-        val cl = IntArray(2); cr.getLocationOnScreen(cl)
-        if (b.width == 0 || cr.width == 0) return
-        val nc = Engine.cfg.copy(
-            rx = bl[0], ry = bl[1], rw = b.width, rh = b.height,
-            tx = cl[0] + cr.width / 2, ty = cl[1] + cr.height / 2
-        )
+        var nc = Engine.cfg.copy(rx = bl[0], ry = bl[1], rw = b.width, rh = b.height)
+        cross?.let { cr ->
+            if (cr.width > 0) {
+                val cl = IntArray(2); cr.getLocationOnScreen(cl)
+                nc = nc.copy(tx = cl[0] + cr.width / 2, ty = cl[1] + cr.height / 2)
+            }
+        }
         if (nc != Engine.cfg) Engine.save(this, nc)
     }
 
     private fun exitEdit(save: Boolean) {
         if (!Engine.editing && box == null) return
         if (save) saveGeometry()
-        main.removeCallbacks(pctUpdater)
+        main.removeCallbacks(infoUpdater)
         listOf(box, cross, panel).forEach { v -> v?.let { try { wm.removeView(it) } catch (_: Exception) {} } }
-        box = null; cross = null; panel = null; pctText = null; swatch = null
+        box = null; cross = null; panel = null; infoText = null; swatch = null; preview = null; modeBtn = null
         Engine.editing = false
         Engine.stateChanged(this)
         bubble?.invalidate()
+        updateExclude()
         if (save) Toast.makeText(this, "Guardado. Tocá la burbuja para activar.", Toast.LENGTH_SHORT).show()
     }
 
@@ -374,19 +491,20 @@ class ClickerService : AccessibilityService() {
             pathEffect = DashPathEffect(floatArrayOf(dp(8f).toFloat(), dp(5f).toFloat()), 0f)
         }
         private val corner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; color = Color.rgb(255, 213, 79); strokeWidth = BORDER_PX * 2f
+            style = Paint.Style.FILL; color = Color.rgb(255, 213, 79)
         }
-        private var mode = 0 // 1 mover, 2 redimensionar
+        private var mode = 0
         private var dx = 0f; private var dy = 0f
         private var sx = 0; private var sy = 0; private var sw = 0; private var sh = 0
 
         override fun onDraw(canvas: Canvas) {
             val h = BORDER_PX / 2f
             canvas.drawRect(h, h, width - h, height - h, paint)
-            val len = dp(16f).toFloat()
+            // manija de tamaño
+            val s = dp(26f).toFloat()
             val w = width.toFloat(); val hh = height.toFloat()
-            canvas.drawLine(w - len, hh - BORDER_PX, w - BORDER_PX, hh - BORDER_PX, corner)
-            canvas.drawLine(w - BORDER_PX, hh - len, w - BORDER_PX, hh - BORDER_PX, corner)
+            val tri = Path().apply { moveTo(w, hh - s); lineTo(w, hh); lineTo(w - s, hh); close() }
+            canvas.drawPath(tri, corner)
         }
 
         @SuppressLint("ClickableViewAccessibility")
@@ -395,13 +513,13 @@ class ClickerService : AccessibilityService() {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     dx = e.rawX; dy = e.rawY; sx = p.x; sy = p.y; sw = width; sh = height
-                    val zone = max(dp(28f), minOf(width, height) / 3)
+                    val zone = max(dp(40f), minOf(width, height) / 4)
                     mode = if (e.x > width - zone && e.y > height - zone) 2 else 1
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val mx = (e.rawX - dx).toInt(); val my = (e.rawY - dy).toInt()
                     if (mode == 1) { p.x = sx + mx; p.y = sy + my }
-                    else { p.width = max(dp(16f), sw + mx); p.height = max(dp(16f), sh + my) }
+                    else { p.width = max(dp(24f), sw + mx); p.height = max(dp(24f), sh + my) }
                     try { wm.updateViewLayout(this, p) } catch (_: Exception) {}
                 }
                 MotionEvent.ACTION_UP -> saveGeometry()
@@ -410,7 +528,7 @@ class ClickerService : AccessibilityService() {
         }
     }
 
-    /** Mira que marca dónde se va a tocar. */
+    /** Mira que marca dónde se va a tocar (modo punto fijo). */
     @SuppressLint("ViewConstructor")
     private inner class CrossView(ctx: Context) : View(ctx) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -440,7 +558,6 @@ class ClickerService : AccessibilityService() {
         }
     }
 
-    /** Abrir la app (por ejemplo, desde la burbuja o el botón rápido). */
     fun openApp() {
         startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
