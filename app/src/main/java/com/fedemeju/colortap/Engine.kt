@@ -129,7 +129,7 @@ object Engine {
         active = on && capturing && !editing && cfg.ready
         wasMatch = false
         recentT.fill(0)
-        speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1)
+        speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1); sideLastLane.fill(-1); sideStable.fill(0); prevObs.fill(-1f)
         stateChanged(ctx)
     }
 
@@ -363,6 +363,8 @@ object Engine {
     private var prevObsT = 0L
     private val sideLock = LongArray(2)
     private val sideLaneAtTap = IntArray(2) { -1 }
+    private val sideLastLane = IntArray(2) { -1 }
+    private val sideStable = LongArray(2)
 
     private fun hueOf(r: Int, g: Int, b: Int, mx: Int, mn: Int): Float {
         val d = (mx - mn).toFloat()
@@ -457,39 +459,53 @@ object Engine {
             }
         }
 
-        // 3) obstáculo más bajo de cada carril (por encima de la nave de ese lado)
+        // 3) carril de cada nave (sólo si está claro: el doble que en el otro carril)
         val sideShipLane = IntArray(2) { -1 }
         for (sd in 0..1) {
             val a = sd * 2; val b = a + 1
             val best = if (shipCnt[a] >= shipCnt[b]) a else b
-            if (shipCnt[best] >= 4) sideShipLane[sd] = best
+            val other = if (best == a) b else a
+            if (shipCnt[best] >= 4 && shipCnt[best] >= shipCnt[other] * 2) sideShipLane[sd] = best
         }
-        val obsBottom = IntArray(4) { -1 }
-        for (l in 0 until 4) {
-            val sl = sideShipLane[l / 2]
-            val limit = if (sl >= 0) shipTop[sl] - 1 else gh - 1
-            var gy = limit
-            while (gy >= 0) {
-                if (obsRow(l, gy) && (gy == 0 || obsRow(l, gy - 1))) { obsBottom[l] = gy; break }
-                gy--
-            }
+        if (sideShipLane[0] < 0 && sideShipLane[1] < 0) {
+            sideStable.fill(0)
         }
 
-        // 4) velocidad (los bloques bajan: el borde inferior crece)
+        // Distancia (en celdas) desde la nave hasta el bloque más cercano en el carril l.
+        // 0 = hay un bloque al lado de la nave. Los bloques que ya pasaron se ignoran.
+        val INF = Int.MAX_VALUE
+        fun distIn(l: Int, top: Int, bot: Int): Int {
+            var gy = min(gh - 1, bot)
+            while (gy >= 1) {
+                if (obsRow(l, gy) && obsRow(l, gy - 1)) return max(0, top - gy)
+                gy--
+            }
+            return INF
+        }
+
+        // 4) velocidad: seguir el bloque más cercano de cada carril
+        val shipRef = IntArray(2) { sd -> if (sideShipLane[sd] >= 0) sideShipLane[sd] else -1 }
+        val obsNow = FloatArray(4) { -1f }
+        for (l in 0 until 4) {
+            val sl = shipRef[l / 2]
+            val top = if (sl >= 0) shipTop[sl] else gh - 1
+            val d = distIn(l, top, top)
+            if (d != INF && d > 0) obsNow[l] = (top - d).toFloat()
+        }
         if (prevObsT > 0) {
             val dt = (now - prevObsT).toFloat()
-            if (dt in 1f..300f) {
+            if (dt in 5f..200f) {
                 for (l in 0 until 4) {
-                    if (obsBottom[l] < 0 || prevObs[l] < 0) continue
-                    val dy = (obsBottom[l] - prevObs[l]) * step
-                    if (dy > 0 && dy < (y1 - y0) / 4) {
-                        val v = dy / dt
-                        speedEma = if (speedEma == 0f) v else speedEma * 0.8f + v * 0.2f
+                    if (obsNow[l] < 0 || prevObs[l] < 0) continue
+                    val dy = (obsNow[l] - prevObs[l]) * step
+                    if (dy > 0 && dy < (y1 - y0) * 0.08f) {
+                        val v = min(dy / dt, 6f)
+                        speedEma = if (speedEma == 0f) v else speedEma * 0.85f + v * 0.15f
                     }
                 }
             }
         }
-        for (l in 0 until 4) prevObs[l] = obsBottom[l].toFloat()
+        for (l in 0 until 4) prevObs[l] = obsNow[l]
         prevObsT = now
 
         // 5) decidir
@@ -499,21 +515,26 @@ object Engine {
         for (sd in 0..1) {
             val L = sideShipLane[sd]
             info.append(if (sd == 0) "Izq: " else "  Der: ")
-            if (L < 0) { info.append("sin nave"); continue }
+            if (L < 0) { info.append("?"); sideStable[sd] = 0; continue }
             info.append("carril ${L % 2 + 1}")
-            if (sideLaneAtTap[sd] >= 0 && L != sideLaneAtTap[sd]) { sideLock[sd] = 0; sideLaneAtTap[sd] = -1 }
-            if (now < sideLock[sd]) continue
-            val ob = obsBottom[L]
-            if (ob < 0) continue
-            val shipH = max(3, shipBot[L] - shipTop[L] + 1)          // en celdas
-            val reach = max(shipH * 1.4f, speedEma * c.reactMs / step)  // en celdas
-            if (shipTop[L] - ob > reach) continue
-            // ¿el otro carril está libre a la altura de la nave?
+            // la nave tiene que estar quieta en el mismo carril un momento (no en plena animación)
+            if (L != sideLastLane[sd]) { sideLastLane[sd] = L; sideStable[sd] = now }
+            if (sideLaneAtTap[sd] >= 0) {
+                if (L != sideLaneAtTap[sd]) { sideLaneAtTap[sd] = -1; sideLock[sd] = 0 }
+                else if (now < sideLock[sd]) continue
+                else sideLaneAtTap[sd] = -1   // el toque no hizo efecto: permitir reintento
+            }
+            if (now - sideStable[sd] < 70) continue
+
+            val top = shipTop[L]; val bot = shipBot[L]
+            val shipH = max(3, bot - top + 1)
+            val reach = max(shipH * 1.5f, speedEma * c.reactMs / step)
+            val dCur = distIn(L, top, bot)
+            if (dCur == INF || dCur > reach) continue
             val O = if (L % 2 == 0) L + 1 else L - 1
-            val safeTop = max(0, (shipTop[L] - reach * 0.6f - shipH).toInt())
-            var blocked = false
-            for (gy in safeTop..min(gh - 1, shipBot[L])) if (obsRow(O, gy)) { blocked = true; break }
-            if (blocked) { info.append(" (bloqueado)"); continue }
+            val dOther = distIn(O, top, bot)
+            // sólo cambiar si el otro carril está claramente más libre
+            if (dOther != INF && dOther <= dCur + shipH) { info.append(" (bloqueado)"); continue }
             tx[nt] = (x0 + (x1 - x0) * (if (sd == 0) 0.25f else 0.75f)) * scX
             ty[nt] = (y1 - (y1 - y0) * 0.06f) * scY
             tapSides[nt] = sd
@@ -545,7 +566,7 @@ object Engine {
         if (busy && now - busySince < TAP_MS + 250) return
         for (k in 0 until nt) {
             val sd = tapSides[k]
-            sideLock[sd] = now + 400
+            sideLock[sd] = now + 350
             sideLaneAtTap[sd] = sideShipLane[sd]
         }
         lastTap = now
