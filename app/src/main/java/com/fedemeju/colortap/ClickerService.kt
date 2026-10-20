@@ -466,6 +466,7 @@ class ClickerService : AccessibilityService() {
     private fun modeLabel() = when (Engine.cfg.mode) {
         Cfg.MODE_FIXED -> "Modo: punto fijo"
         Cfg.MODE_LANES -> "Modo: carriles"
+        Cfg.MODE_MATH -> "Modo: math quiz"
         else -> "Modo: tocar el color"
     }
 
@@ -475,6 +476,7 @@ class ClickerService : AccessibilityService() {
         val nm = when (c.mode) {
             Cfg.MODE_ON_COLOR -> Cfg.MODE_FIXED
             Cfg.MODE_FIXED -> Cfg.MODE_LANES
+            Cfg.MODE_LANES -> Cfg.MODE_MATH
             else -> Cfg.MODE_ON_COLOR
         }
         var nc = c.copy(mode = nm)
@@ -488,6 +490,10 @@ class ClickerService : AccessibilityService() {
                 nc = nc.copy(color = Cfg.PINK, hueTol = 22)
                 (swatch?.background as? GradientDrawable)?.setColor(Cfg.PINK)
                 Toast.makeText(this, "Carriles: el marco tiene que cubrir el área de juego de lado a lado. Verde = bloques, azul = naves.", Toast.LENGTH_LONG).show()
+            }
+            Cfg.MODE_MATH -> {
+                hideCross()
+                Toast.makeText(this, "Math quiz: poné el marco sobre la cuenta. Las opciones se buscan debajo del marco.", Toast.LENGTH_LONG).show()
             }
             else -> hideCross()
         }
@@ -516,6 +522,7 @@ class ClickerService : AccessibilityService() {
                 Engine.frames == 0 -> "⚠️ No llegan imágenes de la pantalla.\nDetené y volvé a iniciar la captura."
                 Engine.black -> "⚠️ La captura sale NEGRA: este juego\nbloquea la captura de pantalla."
                 Engine.cfg.mode == Cfg.MODE_LANES -> Engine.laneInfo.ifEmpty { "Buscando naves…" }
+                Engine.cfg.mode == Cfg.MODE_MATH -> MathSolver.info.ifEmpty { "Leyendo…" }
                 else -> "Círculos detectados: ${Engine.lastBlobs}\nCaptura ${Engine.capW}×${Engine.capH}"
             }
             infoText?.text = txt

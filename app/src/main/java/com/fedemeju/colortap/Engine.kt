@@ -27,7 +27,9 @@ data class Cfg(
     val repeat: Boolean = false, // modo punto fijo: seguir tocando mientras siga el color
     val multi: Boolean = true,   // si aparecen varios juntos, tocarlos a la vez
     val full: Boolean = false,   // vigilar toda la pantalla (se adapta al girar)
-    val reactMs: Int = 260       // modo carriles: cuánto antes esquivar (ms antes del choque)
+    val reactMs: Int = 260,      // modo carriles: cuánto antes esquivar (ms antes del choque)
+    val mathMinMs: Int = 500,    // math quiz: demora mínima antes de tocar
+    val mathMaxMs: Int = 1000    // math quiz: demora máxima antes de tocar
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -37,6 +39,7 @@ data class Cfg(
         const val MODE_ON_COLOR = 0   // tocar encima de cada mancha del color
         const val MODE_FIXED = 1      // tocar un punto fijo cuando aparece el color
         const val MODE_LANES = 2      // juego de 2 naves x 2 carriles: esquivar bloques
+        const val MODE_MATH = 3       // leer una cuenta y tocar la opción correcta
         val PINK = Color.rgb(232, 67, 106)
     }
 }
@@ -110,7 +113,9 @@ object Engine {
             repeat = p.getBoolean("repeat", d.repeat),
             multi = p.getBoolean("multi", d.multi),
             full = p.getBoolean("full", d.full),
-            reactMs = p.getInt("reactMs", d.reactMs)
+            reactMs = p.getInt("reactMs", d.reactMs),
+            mathMinMs = p.getInt("mathMin", d.mathMinMs),
+            mathMaxMs = p.getInt("mathMax", d.mathMaxMs)
         )
     }
 
@@ -121,7 +126,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).apply()
     }
 
     // ---------- Estado ----------
@@ -129,6 +134,7 @@ object Engine {
         active = on && capturing && !editing && cfg.ready
         wasMatch = false
         recentT.fill(0)
+        MathSolver.reset()
         speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1); sideLastLane.fill(-1); sideStable.fill(0); prevObs.fill(-1f)
         stateChanged(ctx)
     }
@@ -197,6 +203,10 @@ object Engine {
             return
         }
 
+        if (c.mode == Cfg.MODE_MATH) {
+            MathSolver.onFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c, exclude)
+            return
+        }
         if (c.mode == Cfg.MODE_LANES) {
             Color.colorToHSV(c.color, thsv)
             lanesFrame(buf, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c)

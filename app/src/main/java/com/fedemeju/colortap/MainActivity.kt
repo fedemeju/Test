@@ -38,6 +38,8 @@ class MainActivity : Activity() {
     private lateinit var sizeField: EditText
     private lateinit var modeGroup: RadioGroup
     private lateinit var reactField: EditText
+    private lateinit var mathMinField: EditText
+    private lateinit var mathMaxField: EditText
     private lateinit var multiBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
@@ -137,12 +139,15 @@ class MainActivity : Activity() {
         intervalField = field("Revisar cada (ms)", c.intervalMs.toString())
         cooldownField = field("Espera entre toques (ms)", c.cooldownMs.toString())
         reactField = field("Carriles: anticipación (ms)", c.reactMs.toString())
+        mathMinField = field("Math quiz: demora mínima (ms)", c.mathMinMs.toString())
+        mathMaxField = field("Math quiz: demora máxima (ms)", c.mathMaxMs.toString())
         root.addView(title("Modo"))
         modeGroup = RadioGroup(this)
         listOf(
             Cfg.MODE_ON_COLOR to "Tocar sobre el color (blancos)",
             Cfg.MODE_FIXED to "Punto fijo (toca la mira cuando aparece el color)",
-            Cfg.MODE_LANES to "Carriles (2 naves que esquivan bloques)"
+            Cfg.MODE_LANES to "Carriles (2 naves que esquivan bloques)",
+            Cfg.MODE_MATH to "Math quiz (lee la cuenta y toca la respuesta)"
         ).forEach { (m, t) ->
             modeGroup.addView(RadioButton(this).apply { id = 100 + m; text = t; textSize = 15f })
         }
@@ -197,11 +202,11 @@ class MainActivity : Activity() {
         val c = Engine.cfg
         geom.text = if (c.hasRegion)
             "Zona: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})" +
-                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; else -> "  ·  Toca sobre el color" }) +
+                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; Cfg.MODE_MATH -> "  ·  Math quiz"; else -> "  ·  Toca sobre el color" }) +
                 "\nToques hechos: ${Engine.tapCount}"
         else "Zona a vigilar: todavía sin configurar (se hace desde la burbuja)."
         sizeField.setText(c.minSize.toString()); hueField.setText(c.hueTol.toString())
-        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString())
+        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString()); mathMinField.setText(c.mathMinMs.toString()); mathMaxField.setText(c.mathMaxMs.toString())
     }
 
     private fun saveSettings() {
@@ -213,7 +218,9 @@ class MainActivity : Activity() {
             color = col or (0xFF shl 24),
             hueTol = num(hueField, c.hueTol, 1, 90),
             minSize = num(sizeField, c.minSize, 2, 500),
-            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 2),
+            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 3),
+            mathMinMs = num(mathMinField, c.mathMinMs, 0, 10000),
+            mathMaxMs = num(mathMaxField, c.mathMaxMs, 0, 10000),
             reactMs = num(reactField, c.reactMs, 50, 2000),
             intervalMs = num(intervalField, c.intervalMs, 0, 5000),
             cooldownMs = num(cooldownField, c.cooldownMs, 0, 60000),

@@ -11,8 +11,8 @@ android {
         applicationId = "com.fedemeju.colortap"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "3.2"
+        versionCode = 8
+        versionName = "4.0"
     }
 
     // Clave fija para que las actualizaciones se instalen encima sin desinstalar
@@ -41,4 +41,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    // Reconocimiento de texto sin internet (modo math quiz)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 }
