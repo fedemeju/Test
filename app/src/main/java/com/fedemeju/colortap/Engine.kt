@@ -618,6 +618,8 @@ object Engine {
     private var zzDir = -1            // 0 = arriba-izquierda, 1 = arriba-derecha, -1 = sin saber
     private var zzHalf = 0f
     private var zzPrevT = 0L
+    @Volatile var zzHud = ""
+    @Volatile var zzLastTapInfo = ""
     private var zzPrevX = 0f
     private var zzVx = 0f
     private var zzV = 0.25f
@@ -768,7 +770,9 @@ object Engine {
                 if (!t1.isNaN() && s0 > 0f) {
                     val tc = (t1 + t2) / 2f; val wd = t2 - t1
                     cInfo = String.format("\nPróxima curva: %d px (ancho %d)", tc.toInt(), wd.toInt())
+                    zzHud = String.format("%s curva %d px · ancho %d · vel %.2f", if (zzDir == 1) "↗" else "↖", tc.toInt(), wd.toInt(), zzV)
                     if (wd >= rad * 2.5f && tc <= wd * 0.5f * 0.35f + zzV * c.zigLead) {
+                        zzLastTapInfo = String.format("ÚLTIMO TOQUE: curva a %d px (límite %d)", tc.toInt(), (wd * 0.5f * 0.35f + zzV * c.zigLead).toInt())
                         tapNow = true
                         zzDir = 1 - zzDir
                         zzLock = now + 130
@@ -776,12 +780,14 @@ object Engine {
                     }
                 }
             }
+            if (cInfo.isEmpty()) zzHud = (when (zzDir) { 0 -> "↖"; 1 -> "↗"; else -> "?" }) + " sin curva a la vista"
             zigInfo = String.format(
                 "Bola: sí · va hacia %s",
                 when (zzDir) { 0 -> "↖"; 1 -> "↗"; else -> "? (tocá vos para empezar)" }
             ) + cInfo
         } else {
             zigInfo = "No encuentro la bola dentro del marco"
+            zzHud = "sin bola"
         }
         lastBlobs = if (ballOk) 1 else 0
 

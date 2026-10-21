@@ -63,6 +63,36 @@ class ClickerService : AccessibilityService() {
     private var modeBtn: Button? = null
 
     private var flashUntil = 0L
+    private var hud: TextView? = null
+
+    /** Cartel en vivo (modo zigzag activo): qué ve la app y cuándo toca. */
+    private val hudUpdater = object : Runnable {
+        override fun run() {
+            val show = Engine.capturing && Engine.active && Engine.cfg.mode == Cfg.MODE_ZIGZAG
+            if (show) {
+                if (hud == null) {
+                    val tv = TextView(this@ClickerService).apply {
+                        setTextColor(Color.WHITE); textSize = 12f
+                        setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
+                        setBackgroundColor(Color.argb(210, 20, 40, 120))
+                    }
+                    val p = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT).apply {
+                        flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                        y = dp(4f)
+                    }
+                    try { wm.addView(tv, p); hud = tv } catch (_: Exception) {}
+                }
+                val flash = System.currentTimeMillis() < flashUntil + 150
+                hud?.text = (if (flash) "● TOCA  " else "") + Engine.zzHud + "\n" + Engine.zzLastTapInfo
+                hud?.setBackgroundColor(if (flash) Color.argb(230, 0, 120, 60) else Color.argb(210, 20, 40, 120))
+            } else {
+                hud?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                hud = null
+            }
+            main.postDelayed(this, 60)
+        }
+    }
 
     private fun dp(v: Float) = (v * density).toInt()
 
@@ -74,12 +104,15 @@ class ClickerService : AccessibilityService() {
         BORDER_PX = dp(3f)
         Engine.load(this)
         refresh()
+        main.post(hudUpdater)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        main.removeCallbacks(hudUpdater)
+        hud?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         hideMenu()
         exitEdit(save = false)
         removeBubble()
