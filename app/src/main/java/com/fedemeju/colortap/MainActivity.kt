@@ -40,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var reactField: EditText
     private lateinit var mathMinField: EditText
     private lateinit var mathMaxField: EditText
+    private lateinit var zigField: EditText
     private lateinit var multiBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
@@ -141,13 +142,15 @@ class MainActivity : Activity() {
         reactField = field("Carriles: anticipación (ms)", c.reactMs.toString())
         mathMinField = field("Math quiz: demora mínima (ms)", c.mathMinMs.toString())
         mathMaxField = field("Math quiz: demora máxima (ms)", c.mathMaxMs.toString())
+        zigField = field("Zigzag: anticipación del giro (%)", c.zigLead.toString())
         root.addView(title("Modo"))
         modeGroup = RadioGroup(this)
         listOf(
             Cfg.MODE_ON_COLOR to "Tocar sobre el color (blancos)",
             Cfg.MODE_FIXED to "Punto fijo (toca la mira cuando aparece el color)",
             Cfg.MODE_LANES to "Carriles (2 naves que esquivan bloques)",
-            Cfg.MODE_MATH to "Math quiz (lee la cuenta y toca la respuesta)"
+            Cfg.MODE_MATH to "Math quiz (lee la cuenta y toca la respuesta)",
+            Cfg.MODE_ZIGZAG to "Zigzag (gira la bola en cada curva)"
         ).forEach { (m, t) ->
             modeGroup.addView(RadioButton(this).apply { id = 100 + m; text = t; textSize = 15f })
         }
@@ -202,11 +205,11 @@ class MainActivity : Activity() {
         val c = Engine.cfg
         geom.text = if (c.hasRegion)
             "Zona: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})" +
-                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; Cfg.MODE_MATH -> "  ·  Math quiz"; else -> "  ·  Toca sobre el color" }) +
+                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; Cfg.MODE_MATH -> "  ·  Math quiz"; Cfg.MODE_ZIGZAG -> "  ·  Zigzag"; else -> "  ·  Toca sobre el color" }) +
                 "\nToques hechos: ${Engine.tapCount}"
         else "Zona a vigilar: todavía sin configurar (se hace desde la burbuja)."
         sizeField.setText(c.minSize.toString()); hueField.setText(c.hueTol.toString())
-        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString()); mathMinField.setText(c.mathMinMs.toString()); mathMaxField.setText(c.mathMaxMs.toString())
+        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString()); mathMinField.setText(c.mathMinMs.toString()); mathMaxField.setText(c.mathMaxMs.toString()); zigField.setText(c.zigLead.toString())
     }
 
     private fun saveSettings() {
@@ -218,7 +221,8 @@ class MainActivity : Activity() {
             color = col or (0xFF shl 24),
             hueTol = num(hueField, c.hueTol, 1, 90),
             minSize = num(sizeField, c.minSize, 2, 500),
-            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 3),
+            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 4),
+            zigLead = num(zigField, c.zigLead, 50, 400),
             mathMinMs = num(mathMinField, c.mathMinMs, 0, 10000),
             mathMaxMs = num(mathMaxField, c.mathMaxMs, 0, 10000),
             reactMs = num(reactField, c.reactMs, 50, 2000),
@@ -232,6 +236,10 @@ class MainActivity : Activity() {
         if (nc.mode == Cfg.MODE_LANES && c.mode != Cfg.MODE_LANES && (nc.color and 0xFFFFFF) == 0xE53935) {
             Engine.save(this, nc.copy(color = Cfg.PINK, hueTol = 20))
             colorField.setText(String.format("#%06X", Cfg.PINK and 0xFFFFFF)); hueField.setText("20")
+        }
+        if (Engine.cfg.mode == Cfg.MODE_ZIGZAG && c.mode != Cfg.MODE_ZIGZAG) {
+            Engine.save(this, Engine.cfg.copy(color = Cfg.ZIG_YELLOW, hueTol = 15))
+            colorField.setText(String.format("#%06X", Cfg.ZIG_YELLOW and 0xFFFFFF)); hueField.setText("15")
         }
         updateSwatch()
         Toast.makeText(this, "Ajustes guardados", Toast.LENGTH_SHORT).show()

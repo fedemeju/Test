@@ -467,6 +467,7 @@ class ClickerService : AccessibilityService() {
         Cfg.MODE_FIXED -> "Modo: punto fijo"
         Cfg.MODE_LANES -> "Modo: carriles"
         Cfg.MODE_MATH -> "Modo: math quiz"
+        Cfg.MODE_ZIGZAG -> "Modo: zigzag"
         else -> "Modo: tocar el color"
     }
 
@@ -477,6 +478,7 @@ class ClickerService : AccessibilityService() {
             Cfg.MODE_ON_COLOR -> Cfg.MODE_FIXED
             Cfg.MODE_FIXED -> Cfg.MODE_LANES
             Cfg.MODE_LANES -> Cfg.MODE_MATH
+            Cfg.MODE_MATH -> Cfg.MODE_ZIGZAG
             else -> Cfg.MODE_ON_COLOR
         }
         var nc = c.copy(mode = nm)
@@ -490,6 +492,12 @@ class ClickerService : AccessibilityService() {
                 nc = nc.copy(color = Cfg.PINK, hueTol = 22)
                 (swatch?.background as? GradientDrawable)?.setColor(Cfg.PINK)
                 Toast.makeText(this, "Carriles: el marco tiene que cubrir el área de juego de lado a lado. Verde = bloques, azul = naves.", Toast.LENGTH_LONG).show()
+            }
+            Cfg.MODE_ZIGZAG -> {
+                hideCross()
+                nc = nc.copy(color = Cfg.ZIG_YELLOW, hueTol = 15)
+                (swatch?.background as? GradientDrawable)?.setColor(Cfg.ZIG_YELLOW)
+                Toast.makeText(this, "Zigzag: el marco tiene que cubrir la bola y el camino alrededor. Verde = camino, azul = bola. Si el camino es de otro color, tocalo en la vista previa.", Toast.LENGTH_LONG).show()
             }
             Cfg.MODE_MATH -> {
                 hideCross()
@@ -523,6 +531,7 @@ class ClickerService : AccessibilityService() {
                 Engine.black -> "⚠️ La captura sale NEGRA: este juego\nbloquea la captura de pantalla."
                 Engine.cfg.mode == Cfg.MODE_LANES -> Engine.laneInfo.ifEmpty { "Buscando naves…" }
                 Engine.cfg.mode == Cfg.MODE_MATH -> MathSolver.info.ifEmpty { "Leyendo…" }
+                Engine.cfg.mode == Cfg.MODE_ZIGZAG -> Engine.zigInfo.ifEmpty { "Buscando la bola…" }
                 else -> "Círculos detectados: ${Engine.lastBlobs}\nCaptura ${Engine.capW}×${Engine.capH}"
             }
             infoText?.text = txt
