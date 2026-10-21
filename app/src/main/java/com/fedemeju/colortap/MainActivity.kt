@@ -142,7 +142,7 @@ class MainActivity : Activity() {
         reactField = field("Carriles: anticipación (ms)", c.reactMs.toString())
         mathMinField = field("Math quiz: demora mínima (ms)", c.mathMinMs.toString())
         mathMaxField = field("Math quiz: demora máxima (ms)", c.mathMaxMs.toString())
-        zigField = field("Zigzag: anticipación del giro (%)", c.zigLead.toString())
+        zigField = field("Zigzag: anticipación (ms)", c.zigLead.toString())
         root.addView(title("Modo"))
         modeGroup = RadioGroup(this)
         listOf(
@@ -222,7 +222,7 @@ class MainActivity : Activity() {
             hueTol = num(hueField, c.hueTol, 1, 90),
             minSize = num(sizeField, c.minSize, 2, 500),
             mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 4),
-            zigLead = num(zigField, c.zigLead, 50, 400),
+            zigLead = num(zigField, c.zigLead, 0, 400),
             mathMinMs = num(mathMinField, c.mathMinMs, 0, 10000),
             mathMaxMs = num(mathMaxField, c.mathMaxMs, 0, 10000),
             reactMs = num(reactField, c.reactMs, 50, 2000),

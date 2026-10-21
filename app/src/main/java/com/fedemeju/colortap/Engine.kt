@@ -30,7 +30,7 @@ data class Cfg(
     val reactMs: Int = 260,      // modo carriles: cuánto antes esquivar (ms antes del choque)
     val mathMinMs: Int = 500,    // math quiz: demora mínima antes de tocar
     val mathMaxMs: Int = 1000,   // math quiz: demora máxima antes de tocar
-    val zigLead: Int = 130       // zigzag: anticipación del giro (% de medio ancho del camino)
+    val zigLead: Int = 70        // zigzag: anticipación del giro (ms, compensa la demora)
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -119,7 +119,7 @@ object Engine {
             reactMs = p.getInt("reactMs", d.reactMs),
             mathMinMs = p.getInt("mathMin", d.mathMinMs),
             mathMaxMs = p.getInt("mathMax", d.mathMaxMs),
-            zigLead = p.getInt("zigLead", d.zigLead)
+            zigLead = p.getInt("zigLeadMs", d.zigLead)
         )
     }
 
@@ -130,7 +130,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLead", c.zigLead).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).apply()
     }
 
     // ---------- Estado ----------
@@ -139,7 +139,7 @@ object Engine {
         wasMatch = false
         recentT.fill(0)
         MathSolver.reset()
-        zzDir = -1; zzHalf = 0f; zzLock = 0L
+        zzDir = -1; zzHalf = 0f; zzLock = 0L; zzPrevT = 0L; zzVx = 0f; zzV = 0.25f; zzPrevCur = 0f
         speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1); sideLastLane.fill(-1); sideStable.fill(0); prevObs.fill(-1f)
         stateChanged(ctx)
     }
@@ -616,7 +616,15 @@ object Engine {
     // =====================================================================
     @Volatile var zigInfo = ""
     private var zzDir = -1            // 0 = arriba-izquierda, 1 = arriba-derecha, -1 = sin saber
-    private var zzHalf = 0f           // medio ancho del camino (px de captura)
+    private var zzHalf = 0f
+    private var zzPrevT = 0L
+    private var zzPrevX = 0f
+    private var zzVx = 0f
+    private var zzV = 0.25f
+    private var zzPrevCur = 0f
+    private var zzPrevCurT = 0L
+    private const val ZZ_ANG_R = 22
+    private const val ZZ_ANG_L = 36
     private var zzLock = 0L
     private var zgrid = ByteArray(0)
 
@@ -655,7 +663,12 @@ object Engine {
                 val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
                 cols[idx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
                 sum += r + g + b
-                zgrid[idx] = when { isBall(r, g, b) -> 2; isPathTop(r, g, b, c.hueTol) -> 1; else -> 0 }
+                var tz: Byte = when { isBall(r, g, b) -> 2; isPathTop(r, g, b, c.hueTol) -> 1; else -> 0 }
+                if (tz == 2.toByte() && exclude.isNotEmpty()) {
+                    val ex2 = ((x0 + gx * step) * scX).toInt(); val ey2 = ((y0 + gy * step) * scY).toInt()
+                    for (rc in exclude) if (rc.contains(ex2, ey2)) { tz = 0; break }
+                }
+                zgrid[idx] = tz
                 label[idx] = 0
                 idx++
             }
@@ -687,58 +700,86 @@ object Engine {
         val ballY = y0 + by * step + step / 2f
         val rad = sqrt(bestCnt / 3.14f) * step
 
-        // largo de camino delante de la bola en cada diagonal (probando varios ángulos)
-        fun runLen(side: Int): Float {
-            var best = 0f
-            var ang = 15
-            while (ang <= 65) {
-                val a = Math.toRadians(ang.toDouble())
-                val dx = (if (side == 0) -1.0 else 1.0) * Math.cos(a)
-                val dy = -Math.sin(a)
-                var d = rad * 1.1f
-                var miss = 0; var last = 0f; var hit = false
-                while (d < 700f) {
-                    val x = (ballX + dx * d).toInt(); val y = (ballY + dy * d).toInt()
-                    if (x < 0 || y < 0 || x >= w || y >= h) break
-                    val i = y * rs + x * ps
-                    val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
-                    if (isPathTop(r, g, b, c.hueTol)) { miss = 0; last = d; hit = true }
-                    else if (!hit && d < rad * 3f) { d += 2f; continue }   // todavía sobre el borde/sombra de la bola
-                    else if (++miss >= 2) break
-                    d += 2f
-                }
-                if (last > best) best = last
-                ang += 5
+        fun isTop(x: Int, y: Int): Boolean {
+            if (x < 0 || y < 0 || x >= w || y >= h) return false
+            val i = y * rs + x * ps
+            return isPathTop(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff, buf.get(i + 2).toInt() and 0xff, c.hueTol)
+        }
+        /** Largo de camino desde (ox,oy) en dirección (dx,dy). Salta la bola/sombra al principio. */
+        fun ray(ox: Float, oy: Float, dx: Float, dy: Float, start: Float, maxD: Float = 700f): Float {
+            var d = start; var miss = 0; var last = 0f; var hit = false
+            while (d < maxD) {
+                val x = (ox + dx * d).toInt(); val y = (oy + dy * d).toInt()
+                if (x < 0 || y < 0 || x >= w || y >= h) break
+                if (isTop(x, y)) { miss = 0; last = d; hit = true }
+                else if (!hit && d < start + rad * 2f) { d += 2f; continue }
+                else if (++miss >= 2) break
+                d += 2f
             }
-            return best
+            return last
         }
 
         var tapNow = false
         if (ballOk) {
-            val lenL = runLen(0); val lenR = runLen(1)
-            val len = floatArrayOf(lenL, lenR)
-            if (zzDir < 0) {
-                if (max(lenL, lenR) > min(lenL, lenR) * 2f) zzDir = if (lenL > lenR) 0 else 1
+            // Dirección: la cámara sigue a la bola en vertical, así que en pantalla
+            // la bola sólo se mueve a la derecha (↗) o a la izquierda (↖).
+            if (zzPrevT > 0) {
+                val dt = (now - zzPrevT).toFloat()
+                if (dt in 4f..250f) {
+                    val vx = ((ballX - zzPrevX) / dt).coerceIn(-3f, 3f)
+                    zzVx = zzVx * 0.6f + vx * 0.4f
+                }
             }
-            if (zzDir >= 0) {
-                val cur = len[zzDir]; val oth = len[1 - zzDir]
-                // en tramo recto: el otro lado mide ~ medio ancho del camino
-                if (cur > oth * 3f && oth > rad) zzHalf = if (zzHalf == 0f) oth else zzHalf * 0.9f + oth * 0.1f
-                val half = if (zzHalf > 0f) zzHalf else rad * 2.5f
-                if (now >= zzLock) {
-                    if (cur <= half * c.zigLead / 100f && oth >= half * 2f) {
+            zzPrevX = ballX; zzPrevT = now
+            if (now >= zzLock) {
+                if (zzVx > 0.03f) zzDir = 1 else if (zzVx < -0.03f) zzDir = 0
+            }
+
+            var cInfo = ""
+            if (zzDir >= 0 && now >= zzLock) {
+                // ángulos del camino en pantalla (cámara inclinada): ↗ ~22°, ↖ ~36°
+                val aD = Math.toRadians((if (zzDir == 1) ZZ_ANG_R else ZZ_ANG_L).toDouble())
+                val aO = Math.toRadians((if (zzDir == 1) ZZ_ANG_L else ZZ_ANG_R).toDouble())
+                val sD = if (zzDir == 1) 1f else -1f
+                val dX = sD * Math.cos(aD).toFloat(); val dY = -Math.sin(aD).toFloat()
+                val oX = -sD * Math.cos(aO).toFloat(); val oY = -Math.sin(aO).toFloat()
+                val st = rad * 1.2f
+                val cur = ray(ballX, ballY, dX, dY, rad * 1.1f)
+                // velocidad con la que se acerca el final del tramo
+                if (zzPrevCur > 0f && zzPrevCurT > 0) {
+                    val dt = (now - zzPrevCurT).toFloat()
+                    val dv = (zzPrevCur - cur) / max(1f, dt)
+                    if (dv > 0f && dv < 2f) zzV = zzV * 0.7f + dv * 0.3f
+                }
+                zzPrevCur = cur; zzPrevCurT = now
+                // ancho del lado actual, un poco detrás de la bola
+                val s0 = ray(ballX - dX * rad * 2.5f, ballY - dY * rad * 2.5f, oX, oY, st)
+                val thr = max(s0 * 1.6f, s0 + rad * 2f)
+                // buscar adelante la entrada del tramo nuevo (donde la otra diagonal se abre)
+                val tMax = min(cur + rad, 650f)
+                var t1 = Float.NaN; var t2 = Float.NaN
+                var t = -rad
+                while (t <= tMax) {
+                    val open = ray(ballX + dX * t, ballY + dY * t, oX, oY, st) >= thr
+                    if (open) { if (t1.isNaN()) t1 = t; t2 = t }
+                    else if (!t1.isNaN()) break
+                    t += 3f
+                }
+                if (!t1.isNaN() && s0 > 0f) {
+                    val tc = (t1 + t2) / 2f; val wd = t2 - t1
+                    cInfo = String.format("\nPróxima curva: %d px (ancho %d)", tc.toInt(), wd.toInt())
+                    if (wd >= rad * 2.5f && tc <= wd * 0.5f * 0.35f + zzV * c.zigLead) {
                         tapNow = true
                         zzDir = 1 - zzDir
-                        zzLock = now + 150
-                    } else if (cur > half * 2.5f && oth > cur * 1.8f) {
-                        zzDir = 1 - zzDir   // corregir si nos desincronizamos
+                        zzLock = now + 130
+                        zzVx = 0f; zzPrevCur = 0f
                     }
                 }
             }
             zigInfo = String.format(
-                "Bola: sí · va hacia %s\nCamino adelante: izq %d · der %d px (medio ancho %d)",
-                when (zzDir) { 0 -> "↖"; 1 -> "↗"; else -> "?" }, lenL.toInt(), lenR.toInt(), zzHalf.toInt()
-            )
+                "Bola: sí · va hacia %s",
+                when (zzDir) { 0 -> "↖"; 1 -> "↗"; else -> "? (tocá vos para empezar)" }
+            ) + cInfo
         } else {
             zigInfo = "No encuentro la bola dentro del marco"
         }
