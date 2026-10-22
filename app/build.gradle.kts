@@ -11,8 +11,8 @@ android {
         applicationId = "com.fedemeju.colortap"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "4.6"
+        versionCode = 15
+        versionName = "4.7"
     }
 
     // Clave fija para que las actualizaciones se instalen encima sin desinstalar
@@ -45,5 +45,5 @@ android {
 
 dependencies {
     // Reconocimiento de texto sin internet (modo math quiz)
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
 }
