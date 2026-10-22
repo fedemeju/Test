@@ -830,6 +830,7 @@ object Engine {
     private var stV = 0f               // velocidad horizontal del bloque (px/ms)
     private var stFired = false
     private var stPrevT = 0L
+    @Volatile private var stLastJudge = "–"
     private var sgrid = BooleanArray(0)
 
     /** Bloques: cualquier color saturado que no sea el violeta/azul del fondo. */
@@ -839,6 +840,15 @@ object Engine {
         val hh = hueOf(r, g, b, mx, mn)
         return hh < 210f || hh > 300f
     }
+
+    // fondo por fila (el degradé no se mueve): se aprende de los bordes cuando ambos coinciden
+    private var bgR = FloatArray(0); private var bgG = FloatArray(0); private var bgB = FloatArray(0)
+    private var bgOk = BooleanArray(0)
+    private var stAdj = 0f              // corrección automática de la anticipación (ms)
+    private var stFiredAt = 0L
+    private var stFiredDir = 0
+    private var stFiredTV = 0f
+    private var stJudged = true
 
     private fun stackFrame(
         buf: ByteBuffer, w: Int, h: Int, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
@@ -851,19 +861,51 @@ object Engine {
         if (sgrid.size < n) sgrid = BooleanArray(n)
         if (cols.size < n) cols = IntArray(n)
         if (queue.size < n) { queue = IntArray(n); label = IntArray(n) }
+        if (bgR.size != h) { bgR = FloatArray(h); bgG = FloatArray(h); bgB = FloatArray(h); bgOk = BooleanArray(h) }
         val ex = exclude
+        val skipTop = gh * 12 / 100
         var sum = 0L
         var idx = 0
+        val tmp = IntArray(gw)
         for (gy in 0 until gh) {
             val y = y0 + gy * step
             val row = y * rs
+            // bordes izquierdo y derecho de la pantalla
+            var lr = 0; var lg = 0; var lb = 0; var rr = 0; var rg = 0; var rb = 0
+            for (k in 1..6) {
+                val il = row + k * ps; val ir = row + (w - 1 - k) * ps
+                lr += buf.get(il).toInt() and 0xff; lg += buf.get(il + 1).toInt() and 0xff; lb += buf.get(il + 2).toInt() and 0xff
+                rr += buf.get(ir).toInt() and 0xff; rg += buf.get(ir + 1).toInt() and 0xff; rb += buf.get(ir + 2).toInt() and 0xff
+            }
+            if (abs(lr - rr) + abs(lg - rg) + abs(lb - rb) < 20 * 6) {
+                val mr = (lr + rr) / 12f; val mg = (lg + rg) / 12f; val mb = (lb + rb) / 12f
+                if (bgOk[y]) { bgR[y] = bgR[y] * 0.8f + mr * 0.2f; bgG[y] = bgG[y] * 0.8f + mg * 0.2f; bgB[y] = bgB[y] * 0.8f + mb * 0.2f }
+                else { bgR[y] = mr; bgG[y] = mg; bgB[y] = mb; bgOk[y] = true }
+            }
+            // primera vez sin bordes coincidentes: mediana de la fila
+            if (!bgOk[y]) {
+                for (ch in 0..2) {
+                    var k = 0
+                    for (gx in 0 until gw step 4) { tmp[k++] = buf.get(row + (x0 + gx * step) * ps + ch).toInt() and 0xff }
+                    java.util.Arrays.sort(tmp, 0, k)
+                    val m = tmp[k / 2].toFloat()
+                    when (ch) { 0 -> bgR[y] = m; 1 -> bgG[y] = m; else -> bgB[y] = m }
+                }
+                bgOk[y] = true
+            }
+            val br = bgR[y]; val bgg = bgG[y]; val bb = bgB[y]
             for (gx in 0 until gw) {
                 val x = x0 + gx * step
                 val i = row + x * ps
                 val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
                 cols[idx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
                 sum += r + g + b
-                var m = isBlock(r, g, b)
+                var m = false
+                if (gy >= skipTop) {
+                    val dist = abs(r - br) + abs(g - bgg) + abs(b - bb)
+                    val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+                    m = dist > 36f && (mx - mn > 45 || mx < 90)   // color de bloque (no texto blanco)
+                }
                 if (m && ex.isNotEmpty()) {
                     val sx = (x * scX).toInt(); val sy = (y * scY).toInt()
                     for (rc in ex) if (rc.contains(sx, sy)) { m = false; break }
@@ -875,52 +917,66 @@ object Engine {
         }
         black = sum < n * 6L
 
-        // manchas grandes: torre (la más grande) y bloque que se mueve (la más alta, separada)
-        val minCells = max(30, n * 12 / 1000)
-        var tArea = 0; var tTop = 0; var tX = 0f
-        var mTop = Int.MAX_VALUE; var mX = 0f; var mFound = false
-        val blobsA = ArrayList<IntArray>()   // area, top, topxSum, topxCnt
+        // manchas: [área, arriba, abajo, x de la esquina de atrás * 16]
+        val bigCells = max(30, n * 9 / 1000)
+        val smallCells = max(4, n * 8 / 10000)
+        val blobs = ArrayList<IntArray>()
         var lab = 0
         for (stt in 0 until n) {
             if (!sgrid[stt] || label[stt] != 0) continue
             lab++
             var qh = 0; var qt = 0
             queue[qt++] = stt; label[stt] = lab
-            var cnt = 0; var top = Int.MAX_VALUE
+            var cnt = 0; var top = Int.MAX_VALUE; var bot = 0; var sxAll = 0L
             while (qh < qt) {
                 val p = queue[qh++]; val px = p % gw; val py = p / gw
-                cnt++; if (py < top) top = py
+                cnt++; sxAll += px
+                if (py < top) top = py; if (py > bot) bot = py
                 if (px > 0) { val q = p - 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
                 if (px < gw - 1) { val q = p + 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
                 if (py > 0) { val q = p - gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
                 if (py < gh - 1) { val q = p + gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
             }
-            if (cnt < minCells) continue
-            // x de la esquina de atrás: promedio de las celdas de las 2 filas de arriba de la mancha
+            if (cnt < smallCells) continue
             var sx = 0L; var k = 0
             for (gy in top..min(gh - 1, top + 1)) for (gx in 0 until gw) {
-                val q = gy * gw + gx
-                if (label[q] == lab) { sx += gx; k++ }
+                if (label[gy * gw + gx] == lab) { sx += gx; k++ }
             }
             val topx = x0 + (sx.toFloat() / max(1, k)) * step + step / 2f
-            blobsA.add(intArrayOf(cnt, top, (topx * 16).toInt()))
+            val cx = x0 + (sxAll.toFloat() / cnt) * step
+            blobs.add(intArrayOf(cnt, top, bot, (topx * 16).toInt(), (cx * 16).toInt()))
         }
-        if (blobsA.isEmpty()) { zzHud = "sin bloques a la vista"; lastBlobs = 0; stackPreview(gw, gh, n, now); return }
-        val tower = blobsA.maxByOrNull { it[0] }!!
-        tArea = tower[0]; tTop = tower[1]; tX = tower[2] / 16f
-        for (bb in blobsA) if (bb !== tower && bb[1] < tTop && bb[1] < mTop) { mTop = bb[1]; mX = bb[2] / 16f; mFound = true }
+        val big = blobs.filter { it[0] >= bigCells }
+        if (big.isEmpty()) { zzHud = "sin bloques a la vista"; zigInfo = zzHud; lastBlobs = 0; stackPreview(gw, gh, n, now); return }
+        val tower = big.maxByOrNull { it[2] }!!     // la torre llega más abajo
+        val tTop = tower[1]; val tX = tower[3] / 16f
+        var mTop = Int.MAX_VALUE; var mX = 0f; var mFound = false
+        for (bb in big) if (bb !== tower && bb[1] < tTop && bb[1] < mTop) { mTop = bb[1]; mX = bb[3] / 16f; mFound = true }
+
+        // autocorrección: ¿de qué lado cayó el pedazo cortado después del último toque?
+        if (!stJudged && now - stFiredAt in 60L..450L) {
+            val wz = (x1 - x0).toFloat()
+            for (bb in blobs) {
+                if (bb[0] >= bigCells) continue
+                if (abs(bb[1] - tTop) > gh * 15 / 100) continue
+                val dxs = bb[4] / 16f - stFiredTV
+                if (abs(dxs) > wz * 0.25f || abs(dxs) < step * 2) continue
+                val late = (dxs > 0) == (stFiredDir > 0)
+                stAdj = (stAdj + if (late) 8f else -8f).coerceIn(-80f, 80f)
+                stLastJudge = if (late) "tarde → adelanto" else "temprano → atraso"
+                stJudged = true
+                break
+            }
+        }
+        if (!stJudged && now - stFiredAt > 450L) { stJudged = true; stLastJudge = "¡perfecto!" }
 
         val jump = (x1 - x0) * 0.11f
         var mv = Float.NaN
         if (mFound) {
-            if (stPrevMV.isNaN() || abs(mX - stPrevMV) > jump) {
-                // bloque nuevo: empieza otra ronda
-                stFired = false; stV = 0f; stPrevMV = Float.NaN
-            }
+            if (stPrevMV.isNaN() || abs(mX - stPrevMV) > jump) { stFired = false; stV = 0f; stPrevMV = Float.NaN }
             stTV = tX
             mv = mX
         } else if (!stTV.isNaN() && !stPrevMV.isNaN()) {
-            // bloque encima de la torre: lo más alto es el bloque que se mueve
             if (abs(tX - stPrevMV) <= jump) mv = tX else stPrevMV = Float.NaN
         }
         if (!mv.isNaN()) {
@@ -932,27 +988,34 @@ object Engine {
         }
         lastBlobs = if (mFound || !mv.isNaN()) 1 else 0
 
-        var tapNow = false
+        var delay = -1L
+        val lead = c.stackLead + stAdj
         if (!mv.isNaN() && !stTV.isNaN()) {
             val dx = mv - stTV
-            val lim = abs(stV) * c.stackLead + 4f
-            zzHud = String.format("torre %d · bloque %d · dif %d px · vel %.2f", stTV.toInt(), mv.toInt(), dx.toInt(), stV)
-            if (!stFired && dx * stV < 0f && abs(dx) <= lim && abs(stV) > 0.02f) {
-                tapNow = true; stFired = true
-                zzLastTapInfo = String.format("ÚLTIMO TOQUE: dif %d px (límite %d)", dx.toInt(), lim.toInt())
+            zzHud = String.format("dif %d px · vel %.2f · ajuste %+d ms (%s)", dx.toInt(), stV, stAdj.toInt(), stLastJudge)
+            if (!stFired && dx * stV < 0f && abs(stV) > 0.02f) {
+                // en cuántos ms se alinea, menos la anticipación → programar el toque justo
+                val ta = abs(dx) / abs(stV) - lead
+                if (ta <= 45f) {
+                    delay = max(0f, ta).toLong()
+                    stFired = true
+                    stFiredAt = now + delay; stFiredDir = if (stV > 0) 1 else -1; stFiredTV = stTV; stJudged = false
+                    zzLastTapInfo = String.format("ÚLTIMO TOQUE: dif %d px, en %d ms", dx.toInt(), delay)
+                }
             }
         } else {
-            zzHud = if (stTV.isNaN()) "esperando ver la torre y el bloque separados" else "buscando el bloque…"
+            zzHud = if (stTV.isNaN()) "esperando ver la torre y el bloque" else "buscando el bloque…"
         }
         zigInfo = zzHud
         stackPreview(gw, gh, n, now)
 
-        if (!active || !tapNow) return
-        if (busy && now - busySince < TAP_MS + 250) return
+        if (!active || delay < 0) return
         lastTap = now
         tapCount++
         val tx = w * 0.5f * scX; val ty = h * 0.82f * scY
-        fire { ClickerService.instance?.tap(tx, ty) }
+        main.postDelayed({
+            if (active && cfg.mode == Cfg.MODE_STACK) ClickerService.instance?.tap(tx, ty)
+        }, delay)
     }
 
     private fun stackPreview(gw: Int, gh: Int, n: Int, now: Long) {
