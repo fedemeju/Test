@@ -854,7 +854,7 @@ object Engine {
         buf: ByteBuffer, w: Int, h: Int, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
         scX: Float, scY: Float, now: Long, c: Cfg
     ) {
-        val step = max(3, (x1 - x0) / 280)
+        val step = max(4, (x1 - x0) / 270)
         val gw = (x1 - x0) / step; val gh = (y1 - y0) / step
         if (gw < 8 || gh < 8) return
         val n = gw * gh
@@ -950,8 +950,10 @@ object Engine {
         if (big.isEmpty()) { zzHud = "sin bloques a la vista"; zigInfo = zzHud; lastBlobs = 0; stackPreview(gw, gh, n, now); return }
         val tower = big.maxByOrNull { it[2] }!!     // la torre llega más abajo
         val tTop = tower[1]; val tX = tower[3] / 16f
-        var mTop = Int.MAX_VALUE; var mX = 0f; var mFound = false
-        for (bb in big) if (bb !== tower && bb[1] < tTop && bb[1] < mTop) { mTop = bb[1]; mX = bb[3] / 16f; mFound = true }
+        // bloque que se mueve: la mancha grande por encima de la torre MÁS CERCANA a ella
+        // (así se ignoran fotos de perfil, botones y textos de la parte de arriba)
+        var mTop = -1; var mX = 0f; var mFound = false
+        for (bb in big) if (bb !== tower && bb[1] < tTop && bb[2] >= tTop - gh / 4 && bb[1] > mTop) { mTop = bb[1]; mX = bb[3] / 16f; mFound = true }
 
         // autocorrección: ¿de qué lado cayó el pedazo cortado después del último toque?
         if (!stJudged && now - stFiredAt in 60L..450L) {

@@ -11,8 +11,8 @@ android {
         applicationId = "com.fedemeju.colortap"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "4.5"
+        versionCode = 14
+        versionName = "4.6"
     }
 
     // Clave fija para que las actualizaciones se instalen encima sin desinstalar
