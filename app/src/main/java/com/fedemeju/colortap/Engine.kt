@@ -30,7 +30,8 @@ data class Cfg(
     val reactMs: Int = 260,      // modo carriles: cuánto antes esquivar (ms antes del choque)
     val mathMinMs: Int = 500,    // math quiz: demora mínima antes de tocar
     val mathMaxMs: Int = 1000,   // math quiz: demora máxima antes de tocar
-    val zigLead: Int = 70        // zigzag: anticipación del giro (ms, compensa la demora)
+    val zigLead: Int = 70,       // zigzag: anticipación del giro (ms, compensa la demora)
+    val stackLead: Int = 70      // stack: anticipación del toque (ms)
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -43,6 +44,7 @@ data class Cfg(
         const val MODE_MATH = 3       // leer una cuenta y tocar la opción correcta
         const val MODE_ZIGZAG = 4     // bola en camino zigzag: tocar para girar en cada curva
         val ZIG_YELLOW = Color.rgb(250, 226, 100)
+        const val MODE_STACK = 5      // apilar bloques: tocar cuando el bloque queda alineado
         val PINK = Color.rgb(232, 67, 106)
     }
 }
@@ -119,7 +121,8 @@ object Engine {
             reactMs = p.getInt("reactMs", d.reactMs),
             mathMinMs = p.getInt("mathMin", d.mathMinMs),
             mathMaxMs = p.getInt("mathMax", d.mathMaxMs),
-            zigLead = p.getInt("zigLeadMs", d.zigLead)
+            zigLead = p.getInt("zigLeadMs", d.zigLead),
+            stackLead = p.getInt("stackLead", d.stackLead)
         )
     }
 
@@ -130,7 +133,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).putInt("stackLead", c.stackLead).apply()
     }
 
     // ---------- Estado ----------
@@ -139,6 +142,7 @@ object Engine {
         wasMatch = false
         recentT.fill(0)
         MathSolver.reset()
+        stTV = Float.NaN; stPrevMV = Float.NaN; stV = 0f; stFired = false; stPrevT = 0L
         zzDir = -1; zzHalf = 0f; zzLock = 0L; zzPrevT = 0L; zzVx = 0f; zzV = 0.25f; zzPrevCur = 0f
         speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1); sideLastLane.fill(-1); sideStable.fill(0); prevObs.fill(-1f)
         stateChanged(ctx)
@@ -210,6 +214,10 @@ object Engine {
 
         if (c.mode == Cfg.MODE_MATH) {
             MathSolver.onFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c, exclude)
+            return
+        }
+        if (c.mode == Cfg.MODE_STACK) {
+            stackFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c)
             return
         }
         if (c.mode == Cfg.MODE_ZIGZAG) {
@@ -809,6 +817,154 @@ object Engine {
         tapCount++
         val tx = w * 0.5f * scX; val ty = h * 0.86f * scY
         fire { ClickerService.instance?.tap(tx, ty) }
+    }
+
+    // =====================================================================
+    // MODO STACK: un bloque se desliza en diagonal sobre la torre.
+    // La cámara sólo se mueve en vertical, así que se compara en horizontal
+    // la esquina de atrás (punto más alto) del bloque que se mueve con la
+    // de la torre, y se toca cuando van a coincidir.
+    // =====================================================================
+    private var stTV = Float.NaN       // x de la esquina de la torre
+    private var stPrevMV = Float.NaN
+    private var stV = 0f               // velocidad horizontal del bloque (px/ms)
+    private var stFired = false
+    private var stPrevT = 0L
+    private var sgrid = BooleanArray(0)
+
+    /** Bloques: cualquier color saturado que no sea el violeta/azul del fondo. */
+    private fun isBlock(r: Int, g: Int, b: Int): Boolean {
+        val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+        if (mx < 70 || (mx - mn) * 255 < 70 * mx) return false
+        val hh = hueOf(r, g, b, mx, mn)
+        return hh < 210f || hh > 300f
+    }
+
+    private fun stackFrame(
+        buf: ByteBuffer, w: Int, h: Int, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
+        scX: Float, scY: Float, now: Long, c: Cfg
+    ) {
+        val step = max(3, (x1 - x0) / 280)
+        val gw = (x1 - x0) / step; val gh = (y1 - y0) / step
+        if (gw < 8 || gh < 8) return
+        val n = gw * gh
+        if (sgrid.size < n) sgrid = BooleanArray(n)
+        if (cols.size < n) cols = IntArray(n)
+        if (queue.size < n) { queue = IntArray(n); label = IntArray(n) }
+        val ex = exclude
+        var sum = 0L
+        var idx = 0
+        for (gy in 0 until gh) {
+            val y = y0 + gy * step
+            val row = y * rs
+            for (gx in 0 until gw) {
+                val x = x0 + gx * step
+                val i = row + x * ps
+                val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
+                cols[idx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+                sum += r + g + b
+                var m = isBlock(r, g, b)
+                if (m && ex.isNotEmpty()) {
+                    val sx = (x * scX).toInt(); val sy = (y * scY).toInt()
+                    for (rc in ex) if (rc.contains(sx, sy)) { m = false; break }
+                }
+                sgrid[idx] = m
+                label[idx] = 0
+                idx++
+            }
+        }
+        black = sum < n * 6L
+
+        // manchas grandes: torre (la más grande) y bloque que se mueve (la más alta, separada)
+        val minCells = max(30, n * 12 / 1000)
+        var tArea = 0; var tTop = 0; var tX = 0f
+        var mTop = Int.MAX_VALUE; var mX = 0f; var mFound = false
+        val blobsA = ArrayList<IntArray>()   // area, top, topxSum, topxCnt
+        var lab = 0
+        for (stt in 0 until n) {
+            if (!sgrid[stt] || label[stt] != 0) continue
+            lab++
+            var qh = 0; var qt = 0
+            queue[qt++] = stt; label[stt] = lab
+            var cnt = 0; var top = Int.MAX_VALUE
+            while (qh < qt) {
+                val p = queue[qh++]; val px = p % gw; val py = p / gw
+                cnt++; if (py < top) top = py
+                if (px > 0) { val q = p - 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (px < gw - 1) { val q = p + 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py > 0) { val q = p - gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py < gh - 1) { val q = p + gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+            }
+            if (cnt < minCells) continue
+            // x de la esquina de atrás: promedio de las celdas de las 2 filas de arriba de la mancha
+            var sx = 0L; var k = 0
+            for (gy in top..min(gh - 1, top + 1)) for (gx in 0 until gw) {
+                val q = gy * gw + gx
+                if (label[q] == lab) { sx += gx; k++ }
+            }
+            val topx = x0 + (sx.toFloat() / max(1, k)) * step + step / 2f
+            blobsA.add(intArrayOf(cnt, top, (topx * 16).toInt()))
+        }
+        if (blobsA.isEmpty()) { zzHud = "sin bloques a la vista"; lastBlobs = 0; stackPreview(gw, gh, n, now); return }
+        val tower = blobsA.maxByOrNull { it[0] }!!
+        tArea = tower[0]; tTop = tower[1]; tX = tower[2] / 16f
+        for (bb in blobsA) if (bb !== tower && bb[1] < tTop && bb[1] < mTop) { mTop = bb[1]; mX = bb[2] / 16f; mFound = true }
+
+        val jump = (x1 - x0) * 0.11f
+        var mv = Float.NaN
+        if (mFound) {
+            if (stPrevMV.isNaN() || abs(mX - stPrevMV) > jump) {
+                // bloque nuevo: empieza otra ronda
+                stFired = false; stV = 0f; stPrevMV = Float.NaN
+            }
+            stTV = tX
+            mv = mX
+        } else if (!stTV.isNaN() && !stPrevMV.isNaN()) {
+            // bloque encima de la torre: lo más alto es el bloque que se mueve
+            if (abs(tX - stPrevMV) <= jump) mv = tX else stPrevMV = Float.NaN
+        }
+        if (!mv.isNaN()) {
+            if (!stPrevMV.isNaN() && stPrevT > 0) {
+                val dt = (now - stPrevT).toFloat()
+                if (dt in 1f..120f) stV = stV * 0.6f + ((mv - stPrevMV) / dt) * 0.4f
+            }
+            stPrevMV = mv; stPrevT = now
+        }
+        lastBlobs = if (mFound || !mv.isNaN()) 1 else 0
+
+        var tapNow = false
+        if (!mv.isNaN() && !stTV.isNaN()) {
+            val dx = mv - stTV
+            val lim = abs(stV) * c.stackLead + 4f
+            zzHud = String.format("torre %d · bloque %d · dif %d px · vel %.2f", stTV.toInt(), mv.toInt(), dx.toInt(), stV)
+            if (!stFired && dx * stV < 0f && abs(dx) <= lim && abs(stV) > 0.02f) {
+                tapNow = true; stFired = true
+                zzLastTapInfo = String.format("ÚLTIMO TOQUE: dif %d px (límite %d)", dx.toInt(), lim.toInt())
+            }
+        } else {
+            zzHud = if (stTV.isNaN()) "esperando ver la torre y el bloque separados" else "buscando el bloque…"
+        }
+        zigInfo = zzHud
+        stackPreview(gw, gh, n, now)
+
+        if (!active || !tapNow) return
+        if (busy && now - busySince < TAP_MS + 250) return
+        lastTap = now
+        tapCount++
+        val tx = w * 0.5f * scX; val ty = h * 0.82f * scY
+        fire { ClickerService.instance?.tap(tx, ty) }
+    }
+
+    private fun stackPreview(gw: Int, gh: Int, n: Int, now: Long) {
+        if (!editing || now - lastPreview <= 300) return
+        lastPreview = now
+        val raw = cols.copyOf(n); val shown = IntArray(n)
+        for (i in 0 until n) shown[i] = if (sgrid[i]) Color.rgb(0, 255, 90) else {
+            val cc = raw[i]; Color.rgb((Color.red(cc) * 0.5f).toInt(), (Color.green(cc) * 0.5f).toInt(), (Color.blue(cc) * 0.5f).toInt())
+        }
+        previewRaw = raw; previewW = gw; previewH = gh
+        val bmp = try { Bitmap.createBitmap(shown, gw, gh, Bitmap.Config.ARGB_8888) } catch (_: Exception) { null }
+        if (bmp != null) main.post { ClickerService.instance?.onPreview(bmp) }
     }
 
     /** Arma una imagen chica del sector: colores reales, y en verde lo detectado. */

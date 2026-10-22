@@ -68,7 +68,7 @@ class ClickerService : AccessibilityService() {
     /** Cartel en vivo (modo zigzag activo): qué ve la app y cuándo toca. */
     private val hudUpdater = object : Runnable {
         override fun run() {
-            val show = Engine.capturing && Engine.active && Engine.cfg.mode == Cfg.MODE_ZIGZAG
+            val show = Engine.capturing && Engine.active && (Engine.cfg.mode == Cfg.MODE_ZIGZAG || Engine.cfg.mode == Cfg.MODE_STACK)
             if (show) {
                 if (hud == null) {
                     val tv = TextView(this@ClickerService).apply {
@@ -501,6 +501,7 @@ class ClickerService : AccessibilityService() {
         Cfg.MODE_LANES -> "Modo: carriles"
         Cfg.MODE_MATH -> "Modo: math quiz"
         Cfg.MODE_ZIGZAG -> "Modo: zigzag"
+        Cfg.MODE_STACK -> "Modo: stack"
         else -> "Modo: tocar el color"
     }
 
@@ -512,6 +513,7 @@ class ClickerService : AccessibilityService() {
             Cfg.MODE_FIXED -> Cfg.MODE_LANES
             Cfg.MODE_LANES -> Cfg.MODE_MATH
             Cfg.MODE_MATH -> Cfg.MODE_ZIGZAG
+            Cfg.MODE_ZIGZAG -> Cfg.MODE_STACK
             else -> Cfg.MODE_ON_COLOR
         }
         var nc = c.copy(mode = nm)
@@ -525,6 +527,10 @@ class ClickerService : AccessibilityService() {
                 nc = nc.copy(color = Cfg.PINK, hueTol = 22)
                 (swatch?.background as? GradientDrawable)?.setColor(Cfg.PINK)
                 Toast.makeText(this, "Carriles: el marco tiene que cubrir el área de juego de lado a lado. Verde = bloques, azul = naves.", Toast.LENGTH_LONG).show()
+            }
+            Cfg.MODE_STACK -> {
+                hideCross()
+                Toast.makeText(this, "Stack: usá Pantalla entera. Verde = bloques detectados.", Toast.LENGTH_LONG).show()
             }
             Cfg.MODE_ZIGZAG -> {
                 hideCross()
@@ -565,6 +571,7 @@ class ClickerService : AccessibilityService() {
                 Engine.cfg.mode == Cfg.MODE_LANES -> Engine.laneInfo.ifEmpty { "Buscando naves…" }
                 Engine.cfg.mode == Cfg.MODE_MATH -> MathSolver.info.ifEmpty { "Leyendo…" }
                 Engine.cfg.mode == Cfg.MODE_ZIGZAG -> Engine.zigInfo.ifEmpty { "Buscando la bola…" }
+                Engine.cfg.mode == Cfg.MODE_STACK -> Engine.zigInfo.ifEmpty { "Buscando bloques…" }
                 else -> "Círculos detectados: ${Engine.lastBlobs}\nCaptura ${Engine.capW}×${Engine.capH}"
             }
             infoText?.text = txt
