@@ -31,7 +31,8 @@ data class Cfg(
     val mathMinMs: Int = 500,    // math quiz: demora mínima antes de tocar
     val mathMaxMs: Int = 1000,   // math quiz: demora máxima antes de tocar
     val zigLead: Int = 70,       // zigzag: anticipación del giro (ms, compensa la demora)
-    val stackLead: Int = 70      // stack: anticipación del toque (ms)
+    val stackLead: Int = 70,     // stack: anticipación del toque (ms)
+    val ninjaGap: Int = 110      // ninja: ms entre toques seguidos
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -45,6 +46,7 @@ data class Cfg(
         const val MODE_ZIGZAG = 4     // bola en camino zigzag: tocar para girar en cada curva
         val ZIG_YELLOW = Color.rgb(250, 226, 100)
         const val MODE_STACK = 5      // apilar bloques: tocar cuando el bloque queda alineado
+        const val MODE_NINJA = 6      // cortar el bambú esquivando ramas (tipo Timberman)
         val PINK = Color.rgb(232, 67, 106)
     }
 }
@@ -122,7 +124,8 @@ object Engine {
             mathMinMs = p.getInt("mathMin", d.mathMinMs),
             mathMaxMs = p.getInt("mathMax", d.mathMaxMs),
             zigLead = p.getInt("zigLeadMs", d.zigLead),
-            stackLead = p.getInt("stackLead", d.stackLead)
+            stackLead = p.getInt("stackLead", d.stackLead),
+            ninjaGap = p.getInt("ninjaGap", d.ninjaGap)
         )
     }
 
@@ -133,7 +136,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).putInt("stackLead", c.stackLead).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).putInt("stackLead", c.stackLead).putInt("ninjaGap", c.ninjaGap).apply()
     }
 
     // ---------- Estado ----------
@@ -142,6 +145,7 @@ object Engine {
         wasMatch = false
         recentT.fill(0)
         MathSolver.reset()
+        njPrevSig = ""; njLockUntil = 0L; njLastSig = ""
         stTV = Float.NaN; stPrevMV = Float.NaN; stV = 0f; stFired = false; stPrevT = 0L
         zzDir = -1; zzHalf = 0f; zzLock = 0L; zzPrevT = 0L; zzVx = 0f; zzV = 0.25f; zzPrevCur = 0f
         speedEma = 0f; prevObsT = 0L; sideLock.fill(0); sideLaneAtTap.fill(-1); sideLastLane.fill(-1); sideStable.fill(0); prevObs.fill(-1f)
@@ -214,6 +218,10 @@ object Engine {
 
         if (c.mode == Cfg.MODE_MATH) {
             MathSolver.onFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c, exclude)
+            return
+        }
+        if (c.mode == Cfg.MODE_NINJA) {
+            ninjaFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c)
             return
         }
         if (c.mode == Cfg.MODE_STACK) {
@@ -1031,6 +1039,159 @@ object Engine {
         val bmp = try { Bitmap.createBitmap(shown, gw, gh, Bitmap.Config.ARGB_8888) } catch (_: Exception) { null }
         if (bmp != null) main.post { ClickerService.instance?.onPreview(bmp) }
     }
+
+    // =====================================================================
+    // MODO NINJA (tipo Timberman): importa la rama justo encima del ninja.
+    // Se toca del lado contrario a esa rama (o del mismo lado si no hay).
+    // Sólo se decide con el árbol quieto (no en plena animación).
+    // =====================================================================
+    private var njPrevSig = ""
+    private var njLastSig = ""
+    private var njLockUntil = 0L
+    private var njSeg = 0f
+
+    private fun isLeaf(r: Int, g: Int, b: Int) = b < 45 && g > 85 && g >= r + 8
+
+    private fun ninjaFrame(
+        buf: ByteBuffer, w: Int, h: Int, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
+        scX: Float, scY: Float, now: Long, c: Cfg
+    ) {
+        val sx = 3; val sy = 2
+        val gw = (x1 - x0) / sx; val gh = (y1 - y0) / sy
+        if (gw < 20 || gh < 40) return
+        val n = gw * gh
+        if (sgrid.size < n) sgrid = BooleanArray(n)
+        val dark = if (zgrid.size >= n) zgrid else ByteArray(n).also { zgrid = it }
+        var sum = 0L
+        for (gy in 0 until gh) {
+            val row = (y0 + gy * sy) * rs
+            val base = gy * gw
+            for (gx in 0 until gw) {
+                val i = row + (x0 + gx * sx) * ps
+                val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
+                sum += r + g + b
+                sgrid[base + gx] = isLeaf(r, g, b)
+                dark[base + gx] = if (max(r, max(g, b)) < 45) 1 else 0
+            }
+        }
+        black = sum < n * 6L
+        // 1) tronco: columnas mayormente "hoja" en el tercio del medio
+        val colCnt = IntArray(gw)
+        val ya = gh / 3; val yb = 2 * gh / 3
+        for (gy in ya until yb) { val base = gy * gw; for (gx in 0 until gw) if (sgrid[base + gx]) colCnt[gx]++ }
+        var bestA = -1; var bestB = -1; var curA = -1; var lastX = -100
+        for (gx in 0 until gw) {
+            if (colCnt[gx] * 2 > (yb - ya)) {
+                if (gx - lastX > 3) curA = gx
+                lastX = gx
+                if (lastX - curA > bestB - bestA) { bestA = curA; bestB = lastX }
+            }
+        }
+        if (bestA < 0 || bestB - bestA < 4) { zzHud = "no encuentro el bambú"; zigInfo = zzHud; return }
+        val tl = bestA; val tr = bestB
+        // 2) base del tronco
+        var ground = -1
+        var run = 0
+        for (gy in gh - 1 downTo gh / 3) {
+            var k = 0; val base = gy * gw
+            for (gx in tl..tr) if (sgrid[base + gx]) k++
+            if (k * 10 >= (tr - tl + 1) * 6) { run++; if (run >= 6) { ground = gy + run - 1; break } } else run = 0
+        }
+        if (ground < 0) { zzHud = "no encuentro la base del bambú"; zigInfo = zzHud; return }
+        // 3) alto de cada tramo: anillos oscuros del bambú
+        val bright = FloatArray(gh)
+        for (gy in gh / 4 until ground) {
+            var acc = 0; var k = 0
+            val row = (y0 + gy * sy) * rs
+            for (gx in tl + 1 until tr) {
+                val i = row + (x0 + gx * sx) * ps
+                acc += max(buf.get(i).toInt() and 0xff, buf.get(i + 1).toInt() and 0xff); k++
+            }
+            bright[gy] = if (k > 0) acc.toFloat() / k else 0f
+        }
+        val sorted = bright.copyOfRange(gh / 4, ground).sorted()
+        if (sorted.isNotEmpty()) {
+            val med = sorted[sorted.size / 2]
+            val rings = ArrayList<Float>()
+            var st = -1
+            for (gy in gh / 4 until ground) {
+                val d = bright[gy] < med * 0.55f
+                if (d && st < 0) st = gy
+                if (!d && st >= 0) { rings.add((st + gy - 1) / 2f); st = -1 }
+            }
+            if (rings.size >= 3) {
+                val diffs = (1 until rings.size).map { rings[it] - rings[it - 1] }.filter { it > 10 }.sorted()
+                if (diffs.isNotEmpty()) {
+                    val segNow = diffs[diffs.size / 2]
+                    njSeg = if (njSeg == 0f) segNow else njSeg * 0.8f + segNow * 0.2f
+                }
+            }
+        }
+        if (njSeg <= 0f) { zzHud = "midiendo el bambú…"; zigInfo = zzHud; return }
+        val seg = njSeg
+        // 4) ramas a cada lado → nivel (0 = a la altura del ninja, 1 = justo encima)
+        val wz = gw
+        val levels = HashMap<Int, String>()
+        var worst = 0f
+        for (side in 0..1) {
+            val a = if (side == 0) tl - (wz * 17 / 100) else tr + (wz * 3 / 100)
+            val b = if (side == 0) tl - (wz * 3 / 100) else tr + (wz * 17 / 100)
+            val ca = max(0, a); val cb = min(gw - 1, b)
+            if (cb - ca < 3) continue
+            var st = -1
+            for (gy in 0..ground) {
+                var k = 0; val base = gy * gw
+                if (gy < ground) for (gx in ca..cb) if (sgrid[base + gx]) k++
+                val on = gy < ground && k * 100 > (cb - ca + 1) * 15
+                if (on && st < 0) st = gy
+                if (!on && st >= 0) {
+                    if (gy - st >= 2) {
+                        val yc = (st + gy - 1) / 2f
+                        if (yc < ground - 0.3f * seg) {
+                            val f = (ground - yc) / seg - 0.5f - 0.08f
+                            val lv = Math.round(f)
+                            worst = max(worst, abs(f - lv))
+                            if (lv <= 4) levels[lv] = (levels[lv] ?: "") + (if (side == 0) "L" else "R")
+                        }
+                    }
+                    st = -1
+                }
+            }
+        }
+        // 5) lado del ninja: píxeles muy oscuros abajo a cada lado del tronco
+        var nl = 0; var nr = 0
+        val ry0 = max(0, (ground - 1.3f * seg).toInt()); val ry1 = min(gh - 1, ground + 20)
+        for (gy in ry0..ry1) { val base = gy * gw; for (gx in 0 until gw) if (dark[base + gx] == 1.toByte()) { if (gx < tl) nl++ else if (gx > tr) nr++ } }
+        val player = if (nl >= nr) 0 else 1
+        val sig = (0..4).joinToString("") { (levels[it] ?: "-").padEnd(2, ' ') } + player
+        val stable = worst < 0.2f && sig == njPrevSig
+        njPrevSig = sig
+        zzHud = String.format("ninja %s · encima: %s · %s", if (player == 0) "izq" else "der",
+            (levels[1] ?: "nada").replace("L", "rama izq").replace("R", "rama der"), if (stable) "quieto" else "moviéndose")
+        zigInfo = zzHud
+        if (!active || !stable || now < njLockUntil || (sig == njLastSig && now < njLockUntil + 600)) return
+        // 6) planear 2 toques: en cada paso, lado contrario a la rama de ese nivel
+        val taps = ArrayList<Int>()
+        var cur = player
+        for (k in 1..2) {
+            val b = levels[k]
+            if (b != null && b.length >= 2) break   // raro: ramas de los dos lados
+            cur = when (b) { "L" -> 1; "R" -> 0; else -> cur }
+            taps.add(cur)
+        }
+        if (taps.isEmpty()) return
+        njLastSig = sig
+        njLockUntil = now + c.ninjaGap.toLong() * taps.size + 80
+        zzLastTapInfo = "toques: " + taps.joinToString(" ") { if (it == 0) "izq" else "der" }
+        for ((i, side) in taps.withIndex()) {
+            val tx = (if (side == 0) w * 0.2f else w * 0.8f) * scX
+            val ty = h * 0.75f * scY
+            main.postDelayed({
+                if (active && cfg.mode == Cfg.MODE_NINJA) { tapCount++; ClickerService.instance?.tap(tx, ty) }
+            }, (i * c.ninjaGap).toLong())
+        }
+    }
+
 
     /** Arma una imagen chica del sector: colores reales, y en verde lo detectado. */
     private fun buildPreview(gw: Int, gh: Int, n: Int) {
