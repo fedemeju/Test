@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var zigField: EditText
     private lateinit var stackField: EditText
     private lateinit var ninjaField: EditText
+    private lateinit var parkField: EditText
     private lateinit var multiBox: CheckBox
     private lateinit var intervalField: EditText
     private lateinit var cooldownField: EditText
@@ -147,6 +148,7 @@ class MainActivity : Activity() {
         zigField = field("Zigzag: anticipación (ms)", c.zigLead.toString())
         stackField = field("Stack: anticipación (ms)", c.stackLead.toString())
         ninjaField = field("Ninja: ms entre toques", c.ninjaGap.toString())
+        parkField = field("Estacionar: ms mínimos entre toques", c.parkGap.toString())
         root.addView(title("Modo"))
         modeGroup = RadioGroup(this)
         listOf(
@@ -156,7 +158,8 @@ class MainActivity : Activity() {
             Cfg.MODE_MATH to "Math quiz (lee la cuenta y toca la respuesta)",
             Cfg.MODE_ZIGZAG to "Zigzag (gira la bola en cada curva)",
             Cfg.MODE_STACK to "Stack (apila los bloques alineados)",
-            Cfg.MODE_NINJA to "Ninja (corta el bambú esquivando ramas)"
+            Cfg.MODE_NINJA to "Ninja (corta el bambú esquivando ramas)",
+            Cfg.MODE_PARK to "Estacionar (experimental)"
         ).forEach { (m, t) ->
             modeGroup.addView(RadioButton(this).apply { id = 100 + m; text = t; textSize = 15f })
         }
@@ -211,11 +214,11 @@ class MainActivity : Activity() {
         val c = Engine.cfg
         geom.text = if (c.hasRegion)
             "Zona: ${c.rw}×${c.rh} px en (${c.rx}, ${c.ry})" +
-                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; Cfg.MODE_MATH -> "  ·  Math quiz"; Cfg.MODE_ZIGZAG -> "  ·  Zigzag"; Cfg.MODE_STACK -> "  ·  Stack"; Cfg.MODE_NINJA -> "  ·  Ninja"; else -> "  ·  Toca sobre el color" }) +
+                (when (c.mode) { Cfg.MODE_FIXED -> "  ·  Toque fijo en (${c.tx}, ${c.ty})"; Cfg.MODE_LANES -> "  ·  Modo carriles"; Cfg.MODE_MATH -> "  ·  Math quiz"; Cfg.MODE_ZIGZAG -> "  ·  Zigzag"; Cfg.MODE_STACK -> "  ·  Stack"; Cfg.MODE_NINJA -> "  ·  Ninja"; Cfg.MODE_PARK -> "  ·  Estacionar"; else -> "  ·  Toca sobre el color" }) +
                 "\nToques hechos: ${Engine.tapCount}"
         else "Zona a vigilar: todavía sin configurar (se hace desde la burbuja)."
         sizeField.setText(c.minSize.toString()); hueField.setText(c.hueTol.toString())
-        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString()); mathMinField.setText(c.mathMinMs.toString()); mathMaxField.setText(c.mathMaxMs.toString()); zigField.setText(c.zigLead.toString()); stackField.setText(c.stackLead.toString()); ninjaField.setText(c.ninjaGap.toString())
+        cooldownField.setText(c.cooldownMs.toString()); modeGroup.check(100 + c.mode); reactField.setText(c.reactMs.toString()); mathMinField.setText(c.mathMinMs.toString()); mathMaxField.setText(c.mathMaxMs.toString()); zigField.setText(c.zigLead.toString()); stackField.setText(c.stackLead.toString()); ninjaField.setText(c.ninjaGap.toString()); parkField.setText(c.parkGap.toString())
     }
 
     private fun saveSettings() {
@@ -227,7 +230,8 @@ class MainActivity : Activity() {
             color = col or (0xFF shl 24),
             hueTol = num(hueField, c.hueTol, 1, 90),
             minSize = num(sizeField, c.minSize, 2, 500),
-            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 6),
+            mode = (modeGroup.checkedRadioButtonId - 100).coerceIn(0, 7),
+            parkGap = num(parkField, c.parkGap, 30, 1000),
             ninjaGap = num(ninjaField, c.ninjaGap, 30, 1000),
             stackLead = num(stackField, c.stackLead, 0, 400),
             zigLead = num(zigField, c.zigLead, 0, 400),

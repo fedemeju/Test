@@ -32,7 +32,8 @@ data class Cfg(
     val mathMaxMs: Int = 1000,   // math quiz: demora máxima antes de tocar
     val zigLead: Int = 70,       // zigzag: anticipación del giro (ms, compensa la demora)
     val stackLead: Int = 70,     // stack: anticipación del toque (ms)
-    val ninjaGap: Int = 110      // ninja: ms entre toques seguidos
+    val ninjaGap: Int = 110,     // ninja: ms entre toques seguidos
+    val parkGap: Int = 90        // estacionar: ms mínimos entre toques
 ) {
     val hasRegion get() = full || (rw > 0 && rh > 0)
     val hasTarget get() = tx >= 0 && ty >= 0
@@ -47,6 +48,7 @@ data class Cfg(
         val ZIG_YELLOW = Color.rgb(250, 226, 100)
         const val MODE_STACK = 5      // apilar bloques: tocar cuando el bloque queda alineado
         const val MODE_NINJA = 6      // cortar el bambú esquivando ramas (tipo Timberman)
+        const val MODE_PARK = 7       // estacionar: llevar el auto al lugar libre con toques
         val PINK = Color.rgb(232, 67, 106)
     }
 }
@@ -125,7 +127,8 @@ object Engine {
             mathMaxMs = p.getInt("mathMax", d.mathMaxMs),
             zigLead = p.getInt("zigLeadMs", d.zigLead),
             stackLead = p.getInt("stackLead", d.stackLead),
-            ninjaGap = p.getInt("ninjaGap", d.ninjaGap)
+            ninjaGap = p.getInt("ninjaGap", d.ninjaGap),
+            parkGap = p.getInt("parkGap", d.parkGap)
         )
     }
 
@@ -136,7 +139,7 @@ object Engine {
             .putInt("tx", c.tx).putInt("ty", c.ty).putInt("mode", c.mode).putInt("color", c.color)
             .putInt("hueTol2", c.hueTol).putInt("minSize", c.minSize)
             .putInt("intervalMs", c.intervalMs).putInt("cooldownMs2", c.cooldownMs)
-            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).putInt("stackLead", c.stackLead).putInt("ninjaGap", c.ninjaGap).apply()
+            .putBoolean("repeat", c.repeat).putBoolean("multi", c.multi).putBoolean("full", c.full).putInt("reactMs", c.reactMs).putInt("mathMin", c.mathMinMs).putInt("mathMax", c.mathMaxMs).putInt("zigLeadMs", c.zigLead).putInt("stackLead", c.stackLead).putInt("ninjaGap", c.ninjaGap).putInt("parkGap", c.parkGap).apply()
     }
 
     // ---------- Estado ----------
@@ -145,6 +148,7 @@ object Engine {
         wasMatch = false
         recentT.fill(0)
         MathSolver.reset()
+        pkPhi = -1f; pkTargetY = -1f; pkLastTap = 0L
         njPrevSig = ""; njLockUntil = 0L; njLastSig = ""
         stTV = Float.NaN; stPrevMV = Float.NaN; stV = 0f; stFired = false; stPrevT = 0L
         zzDir = -1; zzHalf = 0f; zzLock = 0L; zzPrevT = 0L; zzVx = 0f; zzV = 0.25f; zzPrevCur = 0f
@@ -218,6 +222,10 @@ object Engine {
 
         if (c.mode == Cfg.MODE_MATH) {
             MathSolver.onFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c, exclude)
+            return
+        }
+        if (c.mode == Cfg.MODE_PARK) {
+            parkFrame(buf, w, h, rowStride, pixStride, x0, y0, x1, y1, scX, scY, now, c)
             return
         }
         if (c.mode == Cfg.MODE_NINJA) {
@@ -1189,6 +1197,160 @@ object Engine {
             main.postDelayed({
                 if (active && cfg.mode == Cfg.MODE_NINJA) { tapCount++; ClickerService.instance?.tap(tx, ty) }
             }, (i * c.ninjaGap).toLong())
+        }
+    }
+
+
+    // =====================================================================
+    // MODO ESTACIONAR: cada toque empuja el auto hacia la derecha (gira ~50°
+    // y en ~300 ms vuelve a apuntar abajo). Piloto: elegir un lugar libre
+    // (recuadro amarillo) más abajo, calcular el ángulo necesario y tocar
+    // cada vez que el auto apunta más abajo de lo necesario.
+    // =====================================================================
+    private var pkPhi = -1f          // ángulo del auto: 0 = abajo, 90 = derecha (suavizado)
+    private var pkTargetY = -1f
+    private var pkLastTap = 0L
+
+    private fun parkFrame(
+        buf: ByteBuffer, w: Int, h: Int, rs: Int, ps: Int, x0: Int, y0: Int, x1: Int, y1: Int,
+        scX: Float, scY: Float, now: Long, c: Cfg
+    ) {
+        val st = 3
+        val gw = (x1 - x0) / st; val gh = (y1 - y0) / st
+        if (gw < 20 || gh < 20) return
+        val n = gw * gh
+        if (sgrid.size < n) sgrid = BooleanArray(n)
+        if (queue.size < n) { queue = IntArray(n); label = IntArray(n) }
+        val xEntry = x0 + (x1 - x0) * 0.83f
+        val carMaxGx = ((x1 - x0) * 0.81f / st).toInt()
+        val carMinGx = ((x1 - x0) * 0.08f / st).toInt()
+        val slA = ((x1 - x0) * 0.90f / st).toInt(); val slB = ((x1 - x0) * 0.96f / st).toInt()
+        val yelRow = IntArray(gh)
+        val ex = exclude
+        var sum = 0L
+        for (gy in 0 until gh) {
+            val y = y0 + gy * st
+            val row = y * rs
+            val base = gy * gw
+            for (gx in 0 until gw) {
+                val x = x0 + gx * st
+                val i = row + x * ps
+                val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
+                sum += r + g + b
+                var car = false
+                if (gx in carMinGx..carMaxGx) {
+                    val mx = max(r, max(g, b)); val mn = min(r, min(g, b))
+                    car = mx - mn > 60
+                    if (car && ex.isNotEmpty()) {
+                        val sx = (x * scX).toInt(); val sy = (y * scY).toInt()
+                        for (rc in ex) if (rc.contains(sx, sy)) { car = false; break }
+                    }
+                }
+                sgrid[base + gx] = car
+                label[base + gx] = 0
+                if (gx in slA..slB && r > 200 && g > 190 && b < 90) yelRow[gy]++
+            }
+        }
+        black = sum < n * 6L
+
+        // 1) lugares libres: tramos de filas con el borde amarillo
+        val slots = ArrayList<Float>()
+        var sA = -1
+        for (gy in 0..gh) {
+            val on = gy < gh && yelRow[gy] >= 1
+            if (on && sA < 0) sA = gy
+            if (!on && sA >= 0) { if (gy - sA >= 8) slots.add(y0 + ((sA + gy - 1) / 2f) * st); sA = -1 }
+        }
+
+        // 2) auto: mancha de color más avanzada hacia la derecha (área mínima)
+        val minCells = max(20, n / 2500)
+        var best: FloatArray? = null
+        var lab = 0
+        for (s0 in 0 until n) {
+            if (!sgrid[s0] || label[s0] != 0) continue
+            lab++
+            var qh = 0; var qt = 0
+            queue[qt++] = s0; label[s0] = lab
+            var cnt = 0; var sx = 0.0; var sy = 0.0
+            var bx0 = gw; var bx1 = 0; var by0 = gh; var by1 = 0
+            while (qh < qt) {
+                val p = queue[qh++]; val px = p % gw; val py = p / gw
+                cnt++; sx += px; sy += py
+                if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py
+                if (px > 0) { val q = p - 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (px < gw - 1) { val q = p + 1; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py > 0) { val q = p - gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+                if (py < gh - 1) { val q = p + gw; if (sgrid[q] && label[q] == 0) { label[q] = lab; queue[qt++] = q } }
+            }
+            if (cnt < minCells || cnt > n / 40) continue
+            val cx = x0 + (sx / cnt).toFloat() * st; val cy = y0 + (sy / cnt).toFloat() * st
+            if (cx > x0 + (x1 - x0) * 0.75f) continue
+            if (best == null || cx > best[0]) best = floatArrayOf(cx, cy, 0f,
+                (x0 + bx0 * st).toFloat(), (x0 + bx1 * st).toFloat(), (y0 + by0 * st).toFloat(), (y0 + by1 * st).toFloat())
+        }
+        if (best == null) { zzHud = "no veo el auto · libres ${slots.size}"; zigInfo = zzHud; pkPhi = -1f; return }
+        val cx = best[0]; val cy = best[1]
+        val fx0 = max(0, best[3].toInt() - 6); val fx1 = min(w - 1, best[4].toInt() + 6)
+        val fy0 = max(0, best[5].toInt() - 6); val fy1 = min(h - 1, best[6].toInt() + 6)
+        val pxs = ArrayList<Float>(); val pys = ArrayList<Float>()
+        for (yy in fy0..fy1) {
+            val row = yy * rs
+            for (xx in fx0..fx1) {
+                val i = row + xx * ps
+                val r = buf.get(i).toInt() and 0xff; val g = buf.get(i + 1).toInt() and 0xff; val b = buf.get(i + 2).toInt() and 0xff
+                if (max(r, max(g, b)) - min(r, min(g, b)) > 60) { pxs.add(xx.toFloat()); pys.add(yy.toFloat()) }
+            }
+        }
+        var phiNow = Float.NaN
+        if (pxs.size >= 30) {
+            var bestA = 0f; var bestLong = 0; var bestArea = Float.MAX_VALUE
+            var a = 0
+            while (a < 180) {
+                val rr = Math.toRadians(a.toDouble()); val co = Math.cos(rr).toFloat(); val si = Math.sin(rr).toFloat()
+                var u0 = Float.MAX_VALUE; var u1 = -Float.MAX_VALUE; var v0 = Float.MAX_VALUE; var v1 = -Float.MAX_VALUE
+                for (k in pxs.indices) {
+                    val u = pxs[k] * co + pys[k] * si; val v = -pxs[k] * si + pys[k] * co
+                    if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v
+                }
+                val area = (u1 - u0) * (v1 - v0)
+                if (area < bestArea) { bestArea = area; bestA = a.toFloat(); bestLong = if (u1 - u0 >= v1 - v0) a else (a + 90) % 180 }
+                a += 5
+            }
+            phiNow = abs(90f - bestLong)     // 0 = derecho (hacia arriba), 90 = horizontal (hacia los lugares)
+        }
+        if (!phiNow.isNaN()) pkPhi = if (pkPhi < 0f) phiNow else pkPhi * 0.6f + phiNow * 0.4f
+        if (pkPhi < 0f) { zzHud = "midiendo el auto…"; zigInfo = zzHud; return }
+
+        // 3) elegir lugar: más abajo que el auto y alcanzable con un ángulo razonable
+        val dx = xEntry - cx
+        fun need(ys: Float) = Math.toDegrees(Math.atan2(dx.toDouble(), (cy - ys).toDouble())).toFloat()
+        var target = -1f
+        if (pkTargetY > 0f) {
+            val near = slots.minByOrNull { abs(it - pkTargetY) }
+            if (near != null && abs(near - pkTargetY) < (y1 - y0) * 0.12f && near < cy && need(near) < 86f) target = near
+        }
+        if (target < 0f) {
+            for (ys in slots.sortedDescending()) {
+                if (ys >= cy) continue
+                val a = need(ys)
+                if (a in 15f..72f) { target = ys; break }
+            }
+        }
+        pkTargetY = target
+        if (target < 0f) {
+            zzHud = String.format("auto %d° · sin lugar alcanzable (libres %d)", pkPhi.toInt(), slots.size)
+            zigInfo = zzHud; return
+        }
+        // 4) ángulo deseado: hacia la entrada del lugar; al final, horizontal
+        val phiD = if (dx < (x1 - x0) * 0.07f) 90f else need(target)
+        zzHud = String.format("auto %d° · quiere %d° · lugar a %d px", pkPhi.toInt(), phiD.toInt(), (cy - target).toInt())
+        zigInfo = zzHud
+        if (!active) return
+        if (pkPhi < phiD - 8f && now - pkLastTap >= c.parkGap) {
+            pkLastTap = now
+            tapCount++
+            val tx = w * 0.4f * scX; val ty = h * 0.85f * scY
+            fire { ClickerService.instance?.tap(tx, ty) }
         }
     }
 
